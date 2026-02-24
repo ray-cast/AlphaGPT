@@ -196,7 +196,7 @@ def train_run(args, train_frac, decay_type, decay_val, device):
     
     for step in pbar:
         try: x, y = next(iter_loader)
-        except: iter_loader = iter(train_loader); x, y = next(iter_loader)
+        except StopIteration: iter_loader = iter(train_loader); x, y = next(iter_loader)
         x, y = x.to(device), y.to(device)
         
         logits = model(x)

@@ -114,7 +114,7 @@ class DataEngine:
                 # 自动判断是基金还是指数
                 try:
                     df = self.pro.fund_daily(ts_code=INDEX_CODE, start_date=START_DATE, end_date=TEST_END_DATE)
-                except:
+                except Exception:
                     df = self.pro.index_daily(ts_code=INDEX_CODE, start_date=START_DATE, end_date=TEST_END_DATE)
 
             if df is None or df.empty:
