@@ -28,7 +28,7 @@ class DashboardService:
             else:
                 kp = Keypair.from_base58_string(pk_str)
             return str(kp.pubkey())
-        except:
+        except Exception:
             return "Unknown"
 
     def get_wallet_balance(self):
@@ -56,7 +56,7 @@ class DashboardService:
         try:
             with open("best_meme_strategy.json", "r") as f:
                 return json.load(f)
-        except:
+        except (FileNotFoundError, json.JSONDecodeError):
             return {"formula": "Not Trained Yet"}
 
     def get_market_overview(self, limit=50):
@@ -70,7 +70,7 @@ class DashboardService:
         """
         try:
             return pd.read_sql(query, self.engine)
-        except:
+        except Exception:
             return pd.DataFrame()
     
     def get_recent_logs(self, n=50):
