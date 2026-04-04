@@ -159,7 +159,7 @@ class StrategyReport:
         plt.style.use("bmh")
         fig, ax = plt.subplots(figsize=(12, 6))
 
-        ax.plot(x, equity, label="Strategy (excess)", linewidth=1.5)
+        ax.plot(x, equity, label="Strategy (Open-to-Open)", linewidth=1.5)
         ax.plot(x, bench_equity, label="Benchmark (HS300 equal-wt)", alpha=0.5, linewidth=1)
 
         # X 轴日期标签（稀疏化）
