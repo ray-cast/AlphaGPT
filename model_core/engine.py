@@ -47,7 +47,8 @@ class AlphaEngine:
             "step": [],
             "avg_reward": [],
             "best_score": [],
-            "stable_rank": []
+            "stable_rank": [],
+            "total_loss": [],
         }
 
     def _get_strict_mask(self, open_slots, step):
@@ -197,7 +198,13 @@ class AlphaEngine:
 
             # 日志
             avg_reward = rewards.mean().item()
-            postfix = {"AvgRew": f"{avg_reward:.3f}", "Best": f"{self.best_score:.3f}", f"Unique": f"{unique_ratio:.0%}"}
+            total_loss_val = loss.item()
+            postfix = {
+                "AvgRew": f"{avg_reward:.3f}",
+                "Best": f"{self.best_score:.3f}",
+                "Loss": f"{total_loss_val:.2f}",
+                "Unique": f"{unique_ratio:.0%}",
+            }
 
             if self.use_lord and step % 100 == 0:
                 stable_rank = self.rank_monitor.compute()
@@ -207,6 +214,7 @@ class AlphaEngine:
             self.training_history["step"].append(step)
             self.training_history["avg_reward"].append(avg_reward)
             self.training_history["best_score"].append(self.best_score)
+            self.training_history["total_loss"].append(total_loss_val)
 
             pbar.set_postfix(postfix)
 
