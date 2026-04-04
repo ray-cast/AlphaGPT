@@ -1,5 +1,17 @@
 import torch
 
+
+def _cs_rank(x: torch.Tensor) -> torch.Tensor:
+    """截面排名：将每只股票在当日所有股票中的排名归一化到 [0, 1]。"""
+    return x.argsort(dim=0).argsort(0).float() / (x.shape[0] + 1e-6)
+
+
+def _cs_zscore(x: torch.Tensor) -> torch.Tensor:
+    """截面标准化：对每个交易日做 z-score。"""
+    mean = x.mean(dim=0, keepdim=True)
+    std = x.std(dim=0, keepdim=True) + 1e-6
+    return (x - mean) / std
+
 @torch.jit.script
 def _ts_delay(x: torch.Tensor, d: int) -> torch.Tensor:
     if d == 0: return x
@@ -34,5 +46,9 @@ OPS_CONFIG = [
     ('JUMP', _op_jump, 1),
     ('DECAY', _op_decay, 1),
     ('DELAY1', lambda x: _ts_delay(x, 1), 1),
-    ('MAX3', lambda x: torch.max(x, torch.max(_ts_delay(x,1), _ts_delay(x,2))), 1)
+    ('MAX3', lambda x: torch.max(x, torch.max(_ts_delay(x,1), _ts_delay(x,2))), 1),
+
+    # 截面算子 — 量化选股核心操作
+    ('RANK',   _cs_rank,   1),    # 截面排名归一化
+    ('ZSCORE', _cs_zscore, 1),    # 截面标准化
 ]

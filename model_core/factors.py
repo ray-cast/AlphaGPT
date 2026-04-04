@@ -3,11 +3,14 @@ import torch.nn as nn
 
 
 def robust_norm(t):
-    """MAD 鲁棒标准化，截面维度（每只股票独立标准化）。"""
+    """MAD 鲁棒标准化，截面维度（每只股票独立标准化）。NaN 位置保留 NaN。"""
     median = torch.nanmedian(t, dim=1, keepdim=True)[0]
     mad = torch.nanmedian(torch.abs(t - median), dim=1, keepdim=True)[0] + 1e-6
     norm = (t - median) / mad
-    return torch.clamp(norm, -5.0, 5.0)
+    norm = torch.clamp(norm, -5.0, 5.0)
+    # 保留原始 NaN 位置（停牌日）
+    norm = torch.where(torch.isnan(t), torch.full_like(t, float('nan')), norm)
+    return norm
 
 
 def _rolling_mean(x, window):
@@ -122,7 +125,7 @@ class FeatureEngineer:
             robust_norm(realized_vol), # [13] REALIZED_VOL
         ], dim=1)
 
-        # 清理 NaN/Inf
-        features = torch.nan_to_num(features, nan=0.0, posinf=5.0, neginf=-5.0)
+        # 清理 Inf（但保留 NaN 标记停牌日）
+        features = torch.nan_to_num(features, nan=float('nan'), posinf=5.0, neginf=-5.0)
 
         return features

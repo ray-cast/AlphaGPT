@@ -17,7 +17,7 @@ class ModelConfig:
 
     # ---------- 训练参数 ----------
     BATCH_SIZE = 1024
-    TRAIN_STEPS = 800
+    TRAIN_STEPS = 300
     MAX_FORMULA_LEN = 15
 
     # ---------- A股交易成本 ----------

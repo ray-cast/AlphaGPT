@@ -44,22 +44,27 @@ class StrategyReport:
 
         N, T = alpha_oos.shape
 
+        # 排除停牌（NaN 信号或 NaN 收益）
+        valid_mask = ~(torch.isnan(alpha_oos) | torch.isnan(target_oos))
+
         # 构建持仓（复用 AshareBacktest 的逻辑，含动态仓位管理）
-        market_daily_ret = target_oos.mean(dim=0)
+        valid_target = target_oos.clone()
+        valid_target[~valid_mask] = 0.0
+        valid_count = valid_mask.float().sum(dim=0).clamp(min=1)
+        market_daily_ret = valid_target.sum(dim=0) / valid_count
         market_ma20 = self._rolling_mean_1d(market_daily_ret, 20)
 
         position = torch.zeros_like(alpha_oos)
         for t in range(T):
-            alpha_t = alpha_oos[:, t]
-            valid = turnover_oos[:, t] > self.min_turnover
-            scores = alpha_t.clone()
-            scores[~valid] = -float("inf")
-            k = min(self.top_n, valid.sum().int().item())
-            # 市场弱势时减仓
+            alpha_t = alpha_oos[:, t].clone()
+            # 排除停牌和低换手
+            valid_t = valid_mask[:, t] & (turnover_oos[:, t] > self.min_turnover)
+            alpha_t[~valid_t] = -float("inf")
+            k = min(self.top_n, valid_t.sum().int().item())
             if market_ma20[t] < 0:
                 k = max(k // 2, 0)
             if k > 0:
-                _, topk_idx = torch.topk(scores, k)
+                _, topk_idx = torch.topk(alpha_t, k)
                 position[topk_idx, t] = 1.0
 
         # 换手
@@ -74,7 +79,7 @@ class StrategyReport:
         net_pnl = gross_pnl - tx_cost
 
         daily_ret = net_pnl.sum(dim=0).cpu().numpy() / (self.top_n + 1e-9)
-        bench_daily = target_oos.mean(dim=0).cpu().numpy()  # 等权市场均值作为基准
+        bench_daily = market_daily_ret.cpu().numpy()  # 已排除停牌的等权市场均值
 
         # 统计
         metrics = self._compute_metrics(daily_ret, bench_daily, turnover, T)

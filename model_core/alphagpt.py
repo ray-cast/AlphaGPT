@@ -22,7 +22,7 @@ class NewtonSchulzLowRankDecay:
     def __init__(self, named_parameters, decay_rate=1e-3, num_iterations=5, target_keywords=None):
         self.decay_rate = decay_rate
         self.num_iterations = num_iterations
-        self.target_keywords = target_keywords or ["qk_norm", "attention"]
+        self.target_keywords = target_keywords or ["in_proj", "out_proj"]
         self.params_to_decay = []
         
         for name, param in named_parameters:
@@ -71,7 +71,7 @@ class StableRankMonitor:
     """Monitor the effective rank (stable rank) of model parameters."""
     def __init__(self, model, target_keywords=None):
         self.model = model
-        self.target_keywords = target_keywords or ["q_proj", "k_proj", "attention"]
+        self.target_keywords = target_keywords or ["in_proj", "out_proj"]
         self.history = []
     
     @torch.no_grad()

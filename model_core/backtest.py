@@ -37,31 +37,29 @@ class AshareBacktest:
 
         N_stocks, T_len = factors.shape
 
-        # 市场状态判断：等权组合收益的 20 日均线
-        market_daily_ret = target_ret.mean(dim=0)          # [T]
+        # 排除停牌股票（NaN 信号或 NaN target_ret）
+        valid_mask = ~(torch.isnan(factors) | torch.isnan(target_ret))
+        scores = factors.clone()
+        scores[~valid_mask] = float('-inf')
+        scores[turnover_rate <= self.min_turnover] = float('-inf')
+
+        # 市场状态判断：等权组合收益的 20 日均线（排除停牌）
+        valid_target = target_ret.clone()
+        valid_target[~valid_mask] = 0.0
+        valid_count = valid_mask.float().sum(dim=0).clamp(min=1)
+        market_daily_ret = valid_target.sum(dim=0) / valid_count
         market_ma20 = self._rolling_mean_1d(market_daily_ret, 20)
 
-        # 信号 → 排名 → 持仓（带动态仓位管理）
+        # 一次性对所有交易日取 topk
+        _, topk_idx = scores.topk(self.top_n, dim=0)   # [top_n, T_len]
         position = torch.zeros_like(factors)
-        for t in range(T_len):
-            alpha_t = factors[:, t]
+        position.scatter_(0, topk_idx, 1.0)
+        # 持仓中排除无效股票
+        position[~valid_mask] = 0.0
 
-            # 换手率过滤：排除停牌/流动性不足
-            valid = turnover_rate[:, t] > self.min_turnover
-
-            # 在有效股票中排序
-            scores = alpha_t.clone()
-            scores[~valid] = -float("inf")
-
-            # 动态持仓数量：市场弱势时减仓
-            k = min(self.top_n, valid.sum().int().item())
-            if market_ma20[t] < 0:
-                # 熊市减半持仓
-                k = max(k // 2, 0)
-
-            if k > 0:
-                _, topk_idx = torch.topk(scores, k)
-                position[topk_idx, t] = 1.0
+        # 熊市减仓：市场弱势时持仓权重减半
+        bear_mask = market_ma20 < 0
+        position[:, bear_mask] *= 0.5
 
         # 换手
         prev_pos = torch.roll(position, 1, dims=1)
@@ -69,7 +67,6 @@ class AshareBacktest:
         turnover = torch.abs(position - prev_pos)
 
         # 交易成本
-        # 买入时扣 buy_cost，卖出时扣 sell_cost，近似取均值
         avg_cost = (self.buy_cost + self.sell_cost) / 2.0
         tx_cost = turnover * avg_cost
 
@@ -99,7 +96,7 @@ class AshareBacktest:
         running_max = torch.cummax(cum_curve, dim=0)[0]
         drawdown = cum_curve - running_max
         max_dd = drawdown.min()
-        dd_penalty = torch.relu(-max_dd - 0.05) * 2.0  # 回撤超5%惩罚
+        dd_penalty = torch.relu(-max_dd - 0.05) * 2.0
 
         # 换手率惩罚
         avg_turnover = turnover.mean()
@@ -112,15 +109,95 @@ class AshareBacktest:
         if active_days < 10:
             return torch.tensor(-10.0, device=factors.device), 0.0
 
-        # 负收益惩罚：累计收益为负惩罚，力度适中
+        # 负收益惩罚
         neg_return_penalty = 0.0
         if cum_ret < 0:
-            neg_return_penalty = 1.0 + min(abs(cum_ret) * 5.0, 3.0)
+            neg_return_penalty = min(abs(cum_ret) * 2.0, 1.0)
+
+        # IC 奖励：截面预测能力（排除停牌日）
+        ic_bonus = 0.0
+        if N_stocks > 10:
+            # 将 NaN 替换为 0 做排名
+            f_clean = torch.nan_to_num(factors[:, :T_len], nan=0.0)
+            alpha_rank = f_clean.argsort(dim=0).argsort(0).float()
+            ret_clean = torch.nan_to_num(target_ret, nan=0.0)
+            ret_rank = ret_clean.argsort(dim=0).argsort(0).float()
+            ic_per_day = (alpha_rank * ret_rank).sum(dim=0) / (
+                alpha_rank.norm(dim=0) * ret_rank.norm(dim=0) + 1e-6
+            )
+            ic_bonus = ic_per_day.mean() * 5.0
 
         # 综合得分
-        fitness = sortino - dd_penalty - turnover_penalty - neg_return_penalty
+        fitness = sortino - dd_penalty - turnover_penalty - neg_return_penalty + ic_bonus
 
         return fitness, cum_ret.item()
+
+    def evaluate_oos(self, factors, raw_data, target_ret):
+        """在 OOS 区间评估 fitness，用于训练时的 OOS 验证。
+        逻辑与 evaluate 一致，但使用后半段数据。"""
+        turnover_rate = raw_data.get("turnover_rate",
+                            torch.zeros_like(factors))
+
+        T = factors.shape[1]
+        split = int(T * ModelConfig.TRAIN_RATIO)
+        factors = factors[:, split:]
+        target_ret = target_ret[:, split:]
+        turnover_rate = turnover_rate[:, split:]
+
+        N_stocks, T_len = factors.shape
+        if T_len < 20:
+            return torch.tensor(0.0, device=factors.device)
+
+        valid_mask = ~(torch.isnan(factors) | torch.isnan(target_ret))
+        scores = factors.clone()
+        scores[~valid_mask] = float('-inf')
+        scores[turnover_rate <= self.min_turnover] = float('-inf')
+
+        valid_target = target_ret.clone()
+        valid_target[~valid_mask] = 0.0
+        valid_count = valid_mask.float().sum(dim=0).clamp(min=1)
+        market_daily_ret = valid_target.sum(dim=0) / valid_count
+        market_ma20 = self._rolling_mean_1d(market_daily_ret, 20)
+
+        _, topk_idx = scores.topk(self.top_n, dim=0)
+        position = torch.zeros_like(factors)
+        position.scatter_(0, topk_idx, 1.0)
+        position[~valid_mask] = 0.0
+
+        bear_mask = market_ma20 < 0
+        position[:, bear_mask] *= 0.5
+
+        prev_pos = torch.roll(position, 1, dims=1)
+        prev_pos[:, 0] = 0.0
+        turnover = torch.abs(position - prev_pos)
+        avg_cost = (self.buy_cost + self.sell_cost) / 2.0
+        tx_cost = turnover * avg_cost
+
+        gross_pnl = position * target_ret
+        net_pnl = gross_pnl - tx_cost
+        daily_pnl = net_pnl.sum(dim=0) / (self.top_n + 1e-9)
+
+        mean_ret = daily_pnl.mean()
+        neg_returns = daily_pnl[daily_pnl < 0]
+        if len(neg_returns) > 5:
+            downside_std = neg_returns.std()
+        else:
+            downside_std = daily_pnl.std() + 1e-6
+        sortino = mean_ret / (downside_std + 1e-6)
+
+        cum_ret = daily_pnl.sum()
+        cum_curve = torch.cumsum(daily_pnl, dim=0)
+        running_max = torch.cummax(cum_curve, dim=0)[0]
+        drawdown = cum_curve - running_max
+        max_dd = drawdown.min()
+        dd_penalty = torch.relu(-max_dd - 0.05) * 2.0
+
+        neg_return_penalty = 0.0
+        if cum_ret < 0:
+            neg_return_penalty = min(abs(cum_ret) * 2.0, 1.0)
+
+        oos_fitness = sortino - dd_penalty - neg_return_penalty
+        return oos_fitness
 
     @staticmethod
     def _rolling_mean_1d(x, window):

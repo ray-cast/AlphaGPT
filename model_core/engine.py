@@ -19,7 +19,13 @@ class AlphaEngine:
         self.loader.load_data()
 
         self.model = AlphaGPT().to(ModelConfig.DEVICE)
-        self.opt = torch.optim.AdamW(self.model.parameters(), lr=3e-4, weight_decay=1e-5)
+
+        # Standard optimizer
+        self.opt = torch.optim.AdamW(self.model.parameters(), lr=1e-3)
+
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.opt, T_max=ModelConfig.TRAIN_STEPS, eta_min=1e-5
+        )
 
         # LoRD 正则化
         self.use_lord = use_lord_regularization
@@ -28,17 +34,19 @@ class AlphaEngine:
                 self.model.named_parameters(),
                 decay_rate=lord_decay_rate,
                 num_iterations=lord_num_iterations,
-                target_keywords=["q_proj", "k_proj", "attention", "qk_norm"]
+                target_keywords=["in_proj", "out_proj"]
             )
             self.rank_monitor = StableRankMonitor(
                 self.model,
-                target_keywords=["q_proj", "k_proj"]
+                target_keywords=["in_proj", "out_proj"]
             )
         else:
             self.lord_opt = None
             self.rank_monitor = None
 
         self.vm = StackVM()
+        self.patience_counter = 0
+        self.patience_limit = 80  # 连续 N 步无新 best 则早停
         self.bt = AshareBacktest()
 
         self.best_score = -float("inf")
@@ -165,38 +173,66 @@ class AlphaEngine:
                 score, ret_val = self.bt.evaluate(
                     res, self.loader.raw_data_cache, self.loader.target_ret
                 )
-                unique_map[fkey] = (score.item(), ret_val)
-                rewards[i] = score
 
-                if score.item() > self.best_score:
-                    self.best_score = score.item()
+                # OOS 验证：混合 train + oos 得分防止过拟合
+                oos_score = self.bt.evaluate_oos(
+                    res, self.loader.raw_data_cache, self.loader.target_ret
+                )
+                combined_score = 0.6 * score + 0.4 * oos_score
+
+                unique_map[fkey] = (combined_score.item(), ret_val)
+                rewards[i] = combined_score
+
+                if combined_score.item() > self.best_score:
+                    self.best_score = combined_score.item()
                     self.best_formula = trimmed
+                    self.patience_counter = 0  # 重置早停计数器
                     decoded = self._decode(trimmed)
                     tqdm.write(
-                        f"[!] New Best: Score {score:.2f} | "
+                        f"[!] New Best: Score {combined_score:.2f} "
+                        f"(train={score:.2f}, oos={oos_score:.2f}) | "
                         f"CumRet {ret_val:.2%} | {decoded}"
                     )
 
             unique_ratio = len(unique_map) / bs
 
-            # REINFORCE with critic baseline
-            baseline = torch.stack(values, 1).squeeze(-1).mean(dim=1).detach()
-            adv = (rewards - baseline) / (rewards.std() + 1e-5)
+            # 混合奖励：rank + 归一化 raw score，避免公式同质化时梯度消失
+            rank_indices = rewards.argsort().argsort().float()
+            rank_normalized = rank_indices / (bs - 1) * 2 - 1  # 映射到 [-1, 1]
+
+            # Raw score 归一化到 [-1, 1]
+            rew_std = rewards.std() + 1e-6
+            raw_normalized = (rewards - rewards.mean()) / rew_std
+            raw_normalized = raw_normalized.clamp(-1, 1)
+
+            adv = 0.7 * rank_normalized + 0.3 * raw_normalized
+            adv = adv - adv.mean()  # 去均值，确保 baselined
+
             policy_loss = 0
+            entropy = 0
             for t in range(len(log_probs)):
                 policy_loss += -log_probs[t] * adv
+                entropy += -(log_probs[t].exp() * log_probs[t]).sum()
             policy_loss = policy_loss.mean()
+
             # Critic value loss
             value_pred = torch.stack(values, 1).squeeze(-1).mean(dim=1)
             value_loss = F.mse_loss(value_pred, rewards.detach())
-            loss = policy_loss + 0.5 * value_loss
+
+            # Entropy bonus：线性退火 0.1 → 0.05，保持较强探索防止策略塌缩
+            progress = step / max(ModelConfig.TRAIN_STEPS - 1, 1)
+            entropy_coef = 0.1 * (1.0 - progress) + 0.05 * progress
+            loss = policy_loss + 0.5 * value_loss - entropy_coef * entropy / (len(log_probs) * bs)
 
             self.opt.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.opt.step()
 
             if self.use_lord:
                 self.lord_opt.step()
+
+            self.scheduler.step()
 
             # 日志
             avg_reward = rewards.mean().item()
@@ -220,10 +256,16 @@ class AlphaEngine:
             self.training_history["best_formula"] = self.best_formula
             self.training_history["best_decoded"] = self._decode(self.best_formula) if self.best_formula else None
 
-            # 每 20 步或最后一步写盘，减少 I/O 开销
-            if step % 20 == 0 or step == ModelConfig.TRAIN_STEPS - 1:
+            # 每 10 步或最后一步写盘，减少 I/O 开销
+            if step % 10 == 0 or step == ModelConfig.TRAIN_STEPS - 1:
                 with open("training_history.json", "w") as f:
-                    json.dump(self.training_history, f, ensure_ascii=False)
+                    json.dump(self.training_history, f, ensure_ascii=False, indent=2)
+
+            # 早停检查
+            self.patience_counter += 1
+            if self.patience_counter >= self.patience_limit:
+                print(f"\n早停：连续 {self.patience_limit} 步无新最优，终止训练")
+                break
 
             pbar.set_postfix(postfix)
 

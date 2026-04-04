@@ -78,7 +78,8 @@ class AshareDataLoader:
             pivot = pivot.sort_index()
             # 按加载顺序排列列
             pivot = pivot[[c for c in loaded_codes if c in pivot.columns]]
-            pivot = pivot.ffill().fillna(0.0)
+            # 停牌/缺失保留 NaN，不填 0（避免产生虚假收益率）
+            pivot = pivot.ffill()
             return torch.tensor(pivot.values.T, dtype=torch.float32, device=ModelConfig.DEVICE)
 
         self.raw_data_cache = {
@@ -129,6 +130,14 @@ class AshareDataLoader:
         op_next2 = torch.roll(op, -2, dims=1)
         self.target_ret = op_next2 / (op_next + 1e-9) - 1.0
         self.target_ret[:, -2:] = 0.0
+        # 停牌日（open 为 NaN）的 target_ret 设为 0，排除虚假收益
+        suspended = torch.isnan(op)
+        self.target_ret[suspended] = 0.0
+        # 下一个交易日也停牌的，其 target_ret 也无意义
+        suspended_next = torch.isnan(op_next)
+        self.target_ret[suspended_next] = 0.0
+        # 复牌跳空极端收益截断（A股涨跌停 ±10%/±20%，超过 ±25% 视为异常）
+        self.target_ret = self.target_ret.clamp(-0.25, 0.25)
 
         # 7. 训练/测试切分
         self.split_idx = int(len(self.dates) * ModelConfig.TRAIN_RATIO)
