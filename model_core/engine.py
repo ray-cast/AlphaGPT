@@ -117,32 +117,44 @@ class AlphaEngine:
 
             rewards = torch.zeros(bs, device=ModelConfig.DEVICE)
 
+            # 公式去重：相同公式只执行一次，结果映射回原位置
+            formulas = seqs.tolist()
+            unique_map = {}  # tuple(formula) -> (score, ret_val)
             for i in range(bs):
-                formula = seqs[i].tolist()
+                fkey = tuple(formulas[i])
+                if fkey in unique_map:
+                    score, _ = unique_map[fkey]
+                    rewards[i] = score
+                    continue
 
-                res = self.vm.execute(formula, self.loader.feat_tensor)
+                res = self.vm.execute(formulas[i], self.loader.feat_tensor)
 
                 if res is None:
+                    unique_map[fkey] = (-5.0, 0.0)
                     rewards[i] = -5.0
                     continue
 
                 if res.std() < 1e-4:
+                    unique_map[fkey] = (-2.0, 0.0)
                     rewards[i] = -2.0
                     continue
 
                 score, ret_val = self.bt.evaluate(
                     res, self.loader.raw_data_cache, self.loader.target_ret
                 )
+                unique_map[fkey] = (score.item(), ret_val)
                 rewards[i] = score
 
                 if score.item() > self.best_score:
                     self.best_score = score.item()
-                    self.best_formula = formula
-                    decoded = self._decode(formula)
+                    self.best_formula = formulas[i]
+                    decoded = self._decode(formulas[i])
                     tqdm.write(
                         f"[!] New Best: Score {score:.2f} | "
                         f"CumRet {ret_val:.2%} | {decoded}"
                     )
+
+            unique_ratio = len(unique_map) / bs
 
             # REINFORCE with critic baseline
             baseline = torch.stack(values, 1).squeeze(-1).mean(dim=1).detach()
@@ -165,7 +177,7 @@ class AlphaEngine:
 
             # 日志
             avg_reward = rewards.mean().item()
-            postfix = {"AvgRew": f"{avg_reward:.3f}", "Best": f"{self.best_score:.3f}"}
+            postfix = {"AvgRew": f"{avg_reward:.3f}", "Best": f"{self.best_score:.3f}", f"Unique": f"{unique_ratio:.0%}"}
 
             if self.use_lord and step % 100 == 0:
                 stable_rank = self.rank_monitor.compute()
