@@ -29,7 +29,7 @@ class ModelConfig:
     MIN_TURNOVER_RATE = 0.005      # 最低换手率（过滤停牌/流动性不足）
 
     # ---------- 因子维度 ----------
-    INPUT_DIM = 9
+    INPUT_DIM = 14
 
     # ---------- 信号输出 ----------
     SIGNAL_DIR = os.path.join(_PROJECT_ROOT, "signals")

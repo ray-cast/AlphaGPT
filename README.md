@@ -86,7 +86,7 @@ python run_daily.py
 
 ## 因子与算子
 
-**输入因子（9 维）：** RET（对数收益率）、RET5（5 日动量）、VOL_CHG（成交量变化）、AMT_RAT（成交额占比）、TURN（换手率）、PRESSURE（K 线实体压力）、DEV（MA20 偏离度）、RSI（相对强弱）、TREND（MA60 趋势）
+**输入因子（14 维）：** RET（对数收益率）、RET5（5 日动量）、VOL_CHG（成交量变化）、AMT_RAT（成交额占比）、TURN（换手率）、PRESSURE（K 线实体压力）、DEV（MA20 偏离度）、RSI（相对强弱）、TREND（MA60 趋势）、FOMO（成交额加速度）、VOL_CLUSTER（波动率聚集）、HL_RANGE（高低价振幅）、CLOSE_POS（收盘在区间位置）、REALIZED_VOL（已实现波动率）
 
 **算子（12 个）：** ADD、SUB、MUL、DIV、NEG、ABS、SIGN、GATE、JUMP、DECAY、DELAY1、MAX3
 

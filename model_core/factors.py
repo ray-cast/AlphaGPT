@@ -21,16 +21,16 @@ def _rolling_mean(x, window):
 
 
 class FeatureEngineer:
-    INPUT_DIM = 9
+    INPUT_DIM = 14
 
     @staticmethod
     def compute_features(raw_dict):
         """
-        从原始 OHLCV 数据计算 9 维因子。
+        从原始 OHLCV 数据计算 14 维因子。
 
         输入 raw_dict 键: open, high, low, close, vol, amount, turnover_rate
           各自形状 [num_stocks, T]
-        输出: [num_stocks, 9, T]
+        输出: [num_stocks, 14, T]
         """
         c = raw_dict["close"]
         o = raw_dict["open"]
@@ -85,6 +85,26 @@ class FeatureEngineer:
         ma60 = _rolling_mean(c, 60)
         trend = c / (ma60 + 1e-9) - 1.0
 
+        # ---- 因子 9: 成交额加速度（FOMO） ----
+        amt_chg_lag = torch.roll(amt_ratio, 1, dims=1)
+        amt_chg_lag[:, 0] = 0.0
+        fomo = amt_ratio - amt_chg_lag
+
+        # ---- 因子 10: 波动率聚集（VOL_CLUSTER） ----
+        ret_sq = ret ** 2
+        vol_short = _rolling_mean(ret_sq, 5)
+        vol_long = _rolling_mean(ret_sq, 20)
+        vol_cluster = vol_short / (vol_long + 1e-9)
+
+        # ---- 因子 11: 高低价振幅（HL_RANGE） ----
+        hl_range = (h - l) / (c + 1e-9)
+
+        # ---- 因子 12: 收盘在区间位置（CLOSE_POS） ----
+        close_pos = (c - l) / (h - l + 1e-9)
+
+        # ---- 因子 13: 已实现波动率（REALIZED_VOL） ----
+        realized_vol = torch.sqrt(vol_long + 1e-9)
+
         features = torch.stack([
             robust_norm(ret),          # [0] RET
             robust_norm(ret5),         # [1] RET5
@@ -95,6 +115,11 @@ class FeatureEngineer:
             robust_norm(dev),          # [6] DEV
             robust_norm(rel_strength), # [7] RSI
             robust_norm(trend),        # [8] TREND
+            robust_norm(fomo),         # [9] FOMO
+            robust_norm(vol_cluster),  # [10] VOL_CLUSTER
+            robust_norm(hl_range),     # [11] HL_RANGE
+            robust_norm(close_pos),    # [12] CLOSE_POS
+            robust_norm(realized_vol), # [13] REALIZED_VOL
         ], dim=1)
 
         # 清理 NaN/Inf
