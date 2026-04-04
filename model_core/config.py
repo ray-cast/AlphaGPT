@@ -11,10 +11,14 @@ class ModelConfig:
     # ---------- 数据路径 ----------
     DATA_DIR = os.path.join(_PROJECT_ROOT, "data")
 
+    # ---------- 训练日期范围（不限制则留 None） ----------
+    TRAIN_START_DATE = None
+    TRAIN_END_DATE = None
+
     # ---------- 训练参数 ----------
     BATCH_SIZE = 1024
-    TRAIN_STEPS = 500
-    MAX_FORMULA_LEN = 10
+    TRAIN_STEPS = 800
+    MAX_FORMULA_LEN = 15
 
     # ---------- A股交易成本 ----------
     COMMISSION_RATE = 0.00025      # 佣金万2.5（双向）
@@ -28,10 +32,13 @@ class ModelConfig:
     MIN_LOT_SIZE = 100             # 最小交易单位（股）
     MIN_TURNOVER_RATE = 0.005      # 最低换手率（过滤停牌/流动性不足）
 
+    # ---------- 训练/测试切分 ----------
+    TRAIN_RATIO = 0.8           # 训练集占比（0.8 = 80% 训练 / 20% OOS）
+
     # ---------- 因子维度 ----------
     INPUT_DIM = 14
 
     # ---------- 信号输出 ----------
     SIGNAL_DIR = os.path.join(_PROJECT_ROOT, "signals")
     SIGNAL_THRESHOLD = 0.7         # sigmoid 阈值
-    TOP_N_STOCKS = 30              # 截面选股数量
+    TOP_N_STOCKS = 10              # 截面选股数量

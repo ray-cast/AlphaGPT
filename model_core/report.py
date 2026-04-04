@@ -44,7 +44,10 @@ class StrategyReport:
 
         N, T = alpha_oos.shape
 
-        # 构建持仓（复用 AshareBacktest 的逻辑）
+        # 构建持仓（复用 AshareBacktest 的逻辑，含动态仓位管理）
+        market_daily_ret = target_oos.mean(dim=0)
+        market_ma20 = self._rolling_mean_1d(market_daily_ret, 20)
+
         position = torch.zeros_like(alpha_oos)
         for t in range(T):
             alpha_t = alpha_oos[:, t]
@@ -52,6 +55,9 @@ class StrategyReport:
             scores = alpha_t.clone()
             scores[~valid] = -float("inf")
             k = min(self.top_n, valid.sum().int().item())
+            # 市场弱势时减仓
+            if market_ma20[t] < 0:
+                k = max(k // 2, 0)
             if k > 0:
                 _, topk_idx = torch.topk(scores, k)
                 position[topk_idx, t] = 1.0
@@ -177,3 +183,14 @@ class StrategyReport:
         fig.savefig(path, dpi=150)
         plt.close(fig)
         print(f"  Equity curve saved: {path}")
+
+    @staticmethod
+    def _rolling_mean_1d(x, window):
+        """对 1D tensor 计算滚动均值。"""
+        T = x.shape[0]
+        if T < window:
+            return torch.zeros_like(x)
+        pad = torch.zeros(window - 1, device=x.device)
+        x_pad = torch.cat([pad, x])
+        windows = x_pad.unfold(0, window, 1)
+        return windows.mean(dim=-1)

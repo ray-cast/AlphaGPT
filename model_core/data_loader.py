@@ -101,6 +101,24 @@ class AshareDataLoader:
 
         self.dates = sorted(common_dates)
 
+        # 4.5 按配置的日期范围裁剪
+        start_dt = ModelConfig.TRAIN_START_DATE
+        end_dt = ModelConfig.TRAIN_END_DATE
+        if start_dt or end_dt:
+            mask = [True] * len(self.dates)
+            for i, d in enumerate(self.dates):
+                d_int = int(d)
+                if start_dt and d_int < int(start_dt):
+                    mask[i] = False
+                if end_dt and d_int > int(end_dt):
+                    mask[i] = False
+            keep_indices = [i for i, m in enumerate(mask) if m]
+            if keep_indices:
+                s, e = keep_indices[0], keep_indices[-1] + 1
+                self.dates = self.dates[s:e]
+                for key in self.raw_data_cache:
+                    self.raw_data_cache[key] = self.raw_data_cache[key][:, s:e]
+
         # 5. 计算因子
         self.feat_tensor = FeatureEngineer.compute_features(self.raw_data_cache)
 
@@ -112,7 +130,7 @@ class AshareDataLoader:
         self.target_ret[:, -2:] = 0.0
 
         # 7. 训练/测试切分
-        self.split_idx = int(len(self.dates) * 0.8)
+        self.split_idx = int(len(self.dates) * ModelConfig.TRAIN_RATIO)
 
         N, T = self.raw_data_cache["close"].shape
         print(f"数据加载完成: {N} 只股票, {T} 个交易日, {self.feat_tensor.shape[1]} 个因子")

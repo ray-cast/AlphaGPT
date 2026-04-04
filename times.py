@@ -14,9 +14,9 @@ from dotenv import load_dotenv
 load_dotenv()
 TS_TOKEN = os.getenv('TUSHARE_TOKEN', '')
 INDEX_CODE = '511260.SH'
-START_DATE = '20150101' # 训练数据开始
-END_DATE = '20240101' # 训练数据结束
-TEST_END_DATE = '20250101' # 测试时间结束
+START_DATE = '20150105' # 训练数据开始
+END_DATE = '20260403' # 训练数据结束
+TEST_END_DATE = '20260101' # 测试时间结束
 
 BATCH_SIZE = 1024
 TRAIN_ITERATIONS = 400

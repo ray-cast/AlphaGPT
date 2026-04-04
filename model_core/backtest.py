@@ -20,7 +20,7 @@ class AshareBacktest:
         """
         Args:
             factors:    [num_stocks, T] alpha 信号（来自 StackVM）
-            raw_data:   dict，含 'turnover_rate', 'pct_chg'（如有）, 'vol'
+            raw_data:   dict，含 'turnover_rate', 'pct_chg'（如有）, 'vol', 'close'
             target_ret: [num_stocks, T] open-to-open 前向收益
         Returns:
             (fitness: scalar tensor, avg_daily_return: float)
@@ -28,17 +28,20 @@ class AshareBacktest:
         turnover_rate = raw_data.get("turnover_rate",
                             torch.zeros_like(factors))
 
-        # 只在训练期评估（前 80%）
+        # 只在训练期评估
         T = factors.shape[1]
-        split = int(T * 0.8)
+        split = int(T * ModelConfig.TRAIN_RATIO)
         factors = factors[:, :split]
         target_ret = target_ret[:, :split]
         turnover_rate = turnover_rate[:, :split]
 
         N_stocks, T_len = factors.shape
 
-        # 信号 → 排名 → 持仓
-        # 每天截面排序，做多 top_n
+        # 市场状态判断：等权组合收益的 20 日均线
+        market_daily_ret = target_ret.mean(dim=0)          # [T]
+        market_ma20 = self._rolling_mean_1d(market_daily_ret, 20)
+
+        # 信号 → 排名 → 持仓（带动态仓位管理）
         position = torch.zeros_like(factors)
         for t in range(T_len):
             alpha_t = factors[:, t]
@@ -50,9 +53,15 @@ class AshareBacktest:
             scores = alpha_t.clone()
             scores[~valid] = -float("inf")
 
-            # 选取 top_n
-            _, topk_idx = torch.topk(scores, min(self.top_n, valid.sum().int().item()))
-            position[topk_idx, t] = 1.0
+            # 动态持仓数量：市场弱势时减仓
+            k = min(self.top_n, valid.sum().int().item())
+            if market_ma20[t] < 0:
+                # 熊市减半持仓
+                k = max(k // 2, 0)
+
+            if k > 0:
+                _, topk_idx = torch.topk(scores, k)
+                position[topk_idx, t] = 1.0
 
         # 换手
         prev_pos = torch.roll(position, 1, dims=1)
@@ -103,10 +112,26 @@ class AshareBacktest:
         if active_days < 10:
             return torch.tensor(-10.0, device=factors.device), 0.0
 
+        # 负收益惩罚：累计收益为负惩罚，力度适中
+        neg_return_penalty = 0.0
+        if cum_ret < 0:
+            neg_return_penalty = 1.0 + min(abs(cum_ret) * 5.0, 3.0)
+
         # 综合得分
-        fitness = sortino - dd_penalty - turnover_penalty
+        fitness = sortino - dd_penalty - turnover_penalty - neg_return_penalty
 
         return fitness, cum_ret.item()
+
+    @staticmethod
+    def _rolling_mean_1d(x, window):
+        """对 1D tensor 计算滚动均值。"""
+        T = x.shape[0]
+        if T < window:
+            return torch.zeros_like(x)
+        pad = torch.zeros(window - 1, device=x.device)
+        x_pad = torch.cat([pad, x])
+        windows = x_pad.unfold(0, window, 1)
+        return windows.mean(dim=-1)
 
 
 class SingleStockBacktest:
