@@ -57,16 +57,17 @@ class AshareDataLoader:
         master = master.sort_values(["ts_code", "trade_date"]).reset_index(drop=True)
         self.stock_codes = loaded_codes
 
-        # 3. 找到公共交易日（所有股票的交集）
-        date_sets = []
+        # 3. 找到交易日：使用至少 80% 股票都有的日期（避免因少数新股导致交集过小）
+        # 先去掉停牌导致的价格 NaN 行，避免停牌股票被误计入日期统计
+        master = master.dropna(subset=["close"])
+        all_unique_dates = sorted(master["trade_date"].unique())
+        date_count = {}
         for code in loaded_codes:
             sub = master[master["ts_code"] == code]
-            date_sets.append(set(sub["trade_date"].tolist()))
-        common_dates = sorted(set.intersection(*date_sets))
-
-        # 如果公共日期太少，用每个股票各自的日期，后续 forward-fill
-        if len(common_dates) < 100:
-            common_dates = sorted(master["trade_date"].unique())
+            for d in sub["trade_date"].tolist():
+                date_count[d] = date_count.get(d, 0) + 1
+        threshold = len(loaded_codes) * 0.8
+        common_dates = [d for d in all_unique_dates if date_count.get(d, 0) >= threshold]
 
         # 过滤 master 只保留公共日期
         master = master[master["trade_date"].isin(common_dates)]

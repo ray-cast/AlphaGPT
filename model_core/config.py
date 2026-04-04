@@ -12,7 +12,7 @@ class ModelConfig:
     DATA_DIR = os.path.join(_PROJECT_ROOT, "data")
 
     # ---------- 训练日期范围（不限制则留 None） ----------
-    TRAIN_START_DATE = None
+    TRAIN_START_DATE = "20190101"
     TRAIN_END_DATE = None
 
     # ---------- 训练参数 ----------

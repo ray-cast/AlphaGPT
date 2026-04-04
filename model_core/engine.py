@@ -220,8 +220,10 @@ class AlphaEngine:
             self.training_history["best_formula"] = self.best_formula
             self.training_history["best_decoded"] = self._decode(self.best_formula) if self.best_formula else None
 
-            with open("training_history.json", "w") as f:
-                json.dump(self.training_history, f, ensure_ascii=False, indent=2)
+            # 每 20 步或最后一步写盘，减少 I/O 开销
+            if step % 20 == 0 or step == ModelConfig.TRAIN_STEPS - 1:
+                with open("training_history.json", "w") as f:
+                    json.dump(self.training_history, f, ensure_ascii=False)
 
             pbar.set_postfix(postfix)
 
