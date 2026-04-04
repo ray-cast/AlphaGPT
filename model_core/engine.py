@@ -1,6 +1,7 @@
 import os
 import json
 import torch
+import torch.nn.functional as F
 from torch.distributions import Categorical
 from tqdm import tqdm
 
@@ -59,14 +60,16 @@ class AlphaEngine:
             inp = torch.zeros((bs, 1), dtype=torch.long, device=ModelConfig.DEVICE)
 
             log_probs = []
+            values = []
             tokens_list = []
 
             for _ in range(ModelConfig.MAX_FORMULA_LEN):
-                logits, _, _ = self.model(inp)
+                logits, val, _ = self.model(inp)
                 dist = Categorical(logits=logits)
                 action = dist.sample()
 
                 log_probs.append(dist.log_prob(action))
+                values.append(val)
                 tokens_list.append(action)
                 inp = torch.cat([inp, action.unsqueeze(1)], dim=1)
 
@@ -101,12 +104,17 @@ class AlphaEngine:
                         f"CumRet {ret_val:.2%} | {decoded}"
                     )
 
-            # REINFORCE
-            adv = (rewards - rewards.mean()) / (rewards.std() + 1e-5)
-            loss = 0
+            # REINFORCE with critic baseline
+            baseline = torch.stack(values, 1).squeeze(-1).mean(dim=1).detach()
+            adv = (rewards - baseline) / (rewards.std() + 1e-5)
+            policy_loss = 0
             for t in range(len(log_probs)):
-                loss += -log_probs[t] * adv
-            loss = loss.mean()
+                policy_loss += -log_probs[t] * adv
+            policy_loss = policy_loss.mean()
+            # Critic value loss
+            value_pred = torch.stack(values, 1).squeeze(-1).mean(dim=1)
+            value_loss = F.mse_loss(value_pred, rewards.detach())
+            loss = policy_loss + 0.5 * value_loss
 
             self.opt.zero_grad()
             loss.backward()
