@@ -189,7 +189,6 @@ class AlphaEngine:
 
         output_dir = output_dir or ModelConfig.SIGNAL_DIR
         writer.write_signals(alpha_values, output_dir)
-        print(f"信号已输出到: {output_dir}")
 
 
 if __name__ == "__main__":
