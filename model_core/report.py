@@ -63,14 +63,12 @@ class StrategyReport:
         avg_cost = (self.buy_cost + self.sell_cost) / 2.0
         tx_cost = turnover * avg_cost
 
-        # 组合收益（超额收益 = 持仓收益 - 市场均值）
-        market_ret = target_oos.mean(dim=0)
+        # 组合收益（绝对收益）
         gross_pnl = position * target_oos
-        excess_pnl = gross_pnl - position * market_ret
-        net_pnl = excess_pnl - tx_cost
+        net_pnl = gross_pnl - tx_cost
 
         daily_ret = net_pnl.sum(dim=0).cpu().numpy() / (self.top_n + 1e-9)
-        bench_daily = market_ret.cpu().numpy()
+        bench_daily = target_oos.mean(dim=0).cpu().numpy()  # 等权市场均值作为基准
 
         # 统计
         metrics = self._compute_metrics(daily_ret, bench_daily, turnover, T)

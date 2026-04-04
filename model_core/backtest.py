@@ -64,9 +64,8 @@ class AshareBacktest:
         avg_cost = (self.buy_cost + self.sell_cost) / 2.0
         tx_cost = turnover * avg_cost
 
-        # PnL（超额收益 = 持仓收益 - 市场均值）
-        market_ret = target_ret.mean(dim=0)
-        gross_pnl = position * target_ret - position * market_ret
+        # PnL（绝对收益）
+        gross_pnl = position * target_ret
         net_pnl = gross_pnl - tx_cost
 
         # 每天 portfolio 收益（持仓股票的平均收益）

@@ -72,6 +72,22 @@ class AlphaEngine:
             mask[can_pick_op_mask, feat_count:] = 0.0
         return mask
 
+    @staticmethod
+    def _valid_prefix_len(tokens, feat_count, arity_map):
+        """计算合法前缀表达式的实际长度（去除填充部分）。"""
+        open_slots = 1
+        for i, t in enumerate(tokens):
+            t = int(t)
+            if t < feat_count:
+                open_slots -= 1
+            elif t in arity_map:
+                open_slots += arity_map[t] - 1
+            else:
+                return i
+            if open_slots <= 0:
+                return i + 1
+        return len(tokens)
+
     def train(self):
         lord_info = " (LoRD)" if self.use_lord else ""
         print(f"开始沪深300 Alpha Mining{lord_info}...")
@@ -82,8 +98,10 @@ class AlphaEngine:
         feat_count = len(self.model.features_list)
         vocab_size = self.model.vocab_size
         arity_tens = torch.zeros(vocab_size, dtype=torch.long, device=ModelConfig.DEVICE)
+        arity_map = {}
         for i, cfg in enumerate(OPS_CONFIG):
             arity_tens[feat_count + i] = cfg[2]
+            arity_map[feat_count + i] = cfg[2]
 
         for step in pbar:
             bs = ModelConfig.BATCH_SIZE
@@ -121,13 +139,15 @@ class AlphaEngine:
             formulas = seqs.tolist()
             unique_map = {}  # tuple(formula) -> (score, ret_val)
             for i in range(bs):
-                fkey = tuple(formulas[i])
+                vlen = self._valid_prefix_len(formulas[i], feat_count, arity_map)
+                trimmed = formulas[i][:vlen]
+                fkey = tuple(trimmed)
                 if fkey in unique_map:
                     score, _ = unique_map[fkey]
                     rewards[i] = score
                     continue
 
-                res = self.vm.execute(formulas[i], self.loader.feat_tensor)
+                res = self.vm.execute(trimmed, self.loader.feat_tensor)
 
                 if res is None:
                     unique_map[fkey] = (-5.0, 0.0)
@@ -147,8 +167,8 @@ class AlphaEngine:
 
                 if score.item() > self.best_score:
                     self.best_score = score.item()
-                    self.best_formula = formulas[i]
-                    decoded = self._decode(formulas[i])
+                    self.best_formula = trimmed
+                    decoded = self._decode(trimmed)
                     tqdm.write(
                         f"[!] New Best: Score {score:.2f} | "
                         f"CumRet {ret_val:.2%} | {decoded}"
