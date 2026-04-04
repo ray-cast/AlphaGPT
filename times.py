@@ -9,8 +9,10 @@ import os
 import math
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from dotenv import load_dotenv
 
-TS_TOKEN = '20af39742f461b1edc79ff0aec09c8940265babe0c6733e7bf358078'
+load_dotenv()
+TS_TOKEN = os.getenv('TUSHARE_TOKEN', '')
 INDEX_CODE = '511260.SH'
 START_DATE = '20150101' # 训练数据开始
 END_DATE = '20240101' # 训练数据结束
@@ -57,6 +59,19 @@ def _ts_decay_linear(x: torch.Tensor, d: int) -> torch.Tensor:
     w = w / w.sum()
     return (windows * w).sum(dim=-1)
 
+@torch.jit.script
+def _ts_rank(x: torch.Tensor, d: int) -> torch.Tensor:
+    """时序排名：当前值在过去 d 天中的排名百分位 [0, 1]。"""
+    if d <= 1: return torch.zeros_like(x)
+    B, T = x.shape
+    pad = torch.zeros((B, d - 1), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    windows = x_pad.unfold(1, d, 1)  # [B, T, d]
+    # 当前值是 windows[:, :, -1]
+    current = x.unsqueeze(-1)        # [B, T, 1]
+    rank = (windows < current).sum(dim=-1).float()  # 比当前值小的数量
+    return rank / (d - 1)             # 归一化到 [0, 1]
+
 OPS_CONFIG = [
     ('ADD', lambda x, y: x + y, 2),
     ('SUB', lambda x, y: x - y, 2),
@@ -68,7 +83,7 @@ OPS_CONFIG = [
     ('DELTA5', lambda x: _ts_delta(x, 5), 1),
     ('MA20',   lambda x: _ts_decay_linear(x, 20), 1),
     ('STD20',  lambda x: _ts_zscore(x, 20), 1),     # 捕捉异常波动
-    ('TS_RANK20', lambda x: _ts_zscore(x, 20), 1),  # 近似 Rank
+    ('TS_RANK20', lambda x: _ts_rank(x, 20), 1),    # 时序排名百分位
 ]
 
 FEATURES = ['RET', 'RET5', 'VOL_CHG', 'V_RET', 'TREND']
@@ -103,6 +118,8 @@ class AlphaGPT(nn.Module):
 class DataEngine:
     def __init__(self):
         self.pro = ts.pro_api(TS_TOKEN)
+        self.pro._DataApi__token = TS_TOKEN
+        self.pro._DataApi__http_url = 'http://1w1a.xiximiao.com/dataapi'
     def load(self):
         if os.path.exists(DATA_CACHE_PATH):
             df = pd.read_parquet(DATA_CACHE_PATH)
@@ -234,7 +251,7 @@ class DeepQuantMiner:
                 # 过滤掉常数因子
                 if final.std() < 1e-4: return None
                 return final
-        except:
+        except (IndexError, ValueError, KeyError, RuntimeError):
             return None
         return None
 
@@ -309,7 +326,7 @@ class DeepQuantMiner:
             # 1. Generate
             B = BATCH_SIZE
             open_slots = torch.ones(B, dtype=torch.long, device=DEVICE)
-            log_probs, tokens = [], []
+            log_probs, values, tokens = [], [], []
             curr_inp = torch.zeros((B, 1), dtype=torch.long, device=DEVICE)
 
             for step in range(MAX_SEQ_LEN):
@@ -319,6 +336,7 @@ class DeepQuantMiner:
                 action = dist.sample()
 
                 log_probs.append(dist.log_prob(action))
+                values.append(val)
                 tokens.append(action)
                 curr_inp = torch.cat([curr_inp, action.unsqueeze(1)], dim=1)
 
@@ -350,9 +368,14 @@ class DeepQuantMiner:
                         self.best_sharpe = current_best_score
                         self.best_formula_tokens = seqs[valid_idx[best_sub_idx]].cpu().tolist()
 
-            # 3. Update
-            adv = rewards - rewards.mean()
-            loss = -(torch.stack(log_probs, 1).sum(1) * adv).mean()
+            # 3. Update (REINFORCE with critic baseline)
+            baseline = torch.stack(values, 1).squeeze(-1).mean(dim=1).detach()
+            adv = rewards - baseline
+            policy_loss = -(torch.stack(log_probs, 1).sum(1) * adv).mean()
+            # Critic value loss: 让 critic 学习预测 reward
+            value_pred = torch.stack(values, 1).squeeze(-1).mean(dim=1)
+            value_loss = F.mse_loss(value_pred, rewards.detach())
+            loss = policy_loss + 0.5 * value_loss
 
             self.opt.zero_grad()
             loss.backward()
@@ -371,7 +394,7 @@ class DeepQuantMiner:
             args = [_parse() for _ in range(OP_ARITY_MAP[t])]
             return f"{VOCAB[t]}({','.join(args)})"
         try: return _parse()
-        except: return "Invalid"
+        except (IndexError, ValueError, KeyError): return "Invalid"
 
 def final_reality_check(miner, engine):
     print("\n" + "="*60)
