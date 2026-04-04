@@ -216,6 +216,9 @@ class AlphaEngine:
             self.training_history["best_score"].append(self.best_score)
             self.training_history["total_loss"].append(total_loss_val)
 
+            with open("training_history.json", "w") as f:
+                json.dump(self.training_history, f, ensure_ascii=False, indent=2)
+
             pbar.set_postfix(postfix)
 
         # 保存结果
@@ -225,9 +228,6 @@ class AlphaEngine:
                 "score": self.best_score,
                 "decoded": self._decode(self.best_formula) if self.best_formula else None,
             }, f, ensure_ascii=False, indent=2)
-
-        with open("training_history.json", "w") as f:
-            json.dump(self.training_history, f, ensure_ascii=False, indent=2)
 
         print(f"\n训练完成!")
         print(f"  最佳得分: {self.best_score:.4f}")
