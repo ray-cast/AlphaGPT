@@ -10,6 +10,7 @@ from .data_loader import AshareDataLoader
 from .alphagpt import AlphaGPT, NewtonSchulzLowRankDecay, StableRankMonitor
 from .vm import StackVM
 from .backtest import AshareBacktest
+from .ops import OPS_CONFIG
 
 
 class AlphaEngine:
@@ -49,29 +50,68 @@ class AlphaEngine:
             "stable_rank": []
         }
 
+    def _get_strict_mask(self, open_slots, step):
+        """严格 Action Masking：确保生成合法的前缀表达式树。"""
+        feat_count = len(self.model.features_list)
+        vocab_size = self.model.vocab_size
+        B = open_slots.shape[0]
+        mask = torch.full((B, vocab_size), float('-inf'), device=ModelConfig.DEVICE)
+        remaining_steps = ModelConfig.MAX_FORMULA_LEN - step
+
+        # 已完成（open_slots==0）→ pad 第一个 feature，保证序列合法
+        done_mask = (open_slots == 0)
+        mask[done_mask, 0] = 0.0
+
+        active_mask = ~done_mask
+        # 剩余步数不够填坑 → 必须选 feature（arity=0）
+        must_pick_feat = (open_slots >= remaining_steps)
+
+        mask[active_mask, :feat_count] = 0.0  # features 始终可选
+        can_pick_op_mask = active_mask & (~must_pick_feat)
+        if can_pick_op_mask.any():
+            mask[can_pick_op_mask, feat_count:] = 0.0
+        return mask
+
     def train(self):
         lord_info = " (LoRD)" if self.use_lord else ""
         print(f"开始沪深300 Alpha Mining{lord_info}...")
 
         pbar = tqdm(range(ModelConfig.TRAIN_STEPS))
 
+        # 预计算 arity 张量，用于向量化 open_slots 更新
+        feat_count = len(self.model.features_list)
+        vocab_size = self.model.vocab_size
+        arity_tens = torch.zeros(vocab_size, dtype=torch.long, device=ModelConfig.DEVICE)
+        for i, cfg in enumerate(OPS_CONFIG):
+            arity_tens[feat_count + i] = cfg[2]
+
         for step in pbar:
             bs = ModelConfig.BATCH_SIZE
             inp = torch.zeros((bs, 1), dtype=torch.long, device=ModelConfig.DEVICE)
+            open_slots = torch.ones(bs, dtype=torch.long, device=ModelConfig.DEVICE)
 
             log_probs = []
             values = []
             tokens_list = []
 
-            for _ in range(ModelConfig.MAX_FORMULA_LEN):
+            for t in range(ModelConfig.MAX_FORMULA_LEN):
                 logits, val, _ = self.model(inp)
-                dist = Categorical(logits=logits)
+                mask = self._get_strict_mask(open_slots, t)
+                dist = Categorical(logits=(logits + mask))
                 action = dist.sample()
 
                 log_probs.append(dist.log_prob(action))
                 values.append(val)
                 tokens_list.append(action)
                 inp = torch.cat([inp, action.unsqueeze(1)], dim=1)
+
+                # 更新 open_slots
+                is_op = action >= feat_count
+                op_delta = arity_tens[action] - 1
+                feat_delta = torch.full_like(action, -1)
+                delta = torch.where(is_op, op_delta, feat_delta)
+                delta[open_slots == 0] = 0
+                open_slots += delta
 
             seqs = torch.stack(tokens_list, dim=1)
 
