@@ -52,12 +52,38 @@ def run_train():
     eng.train()
     eng.generate_signals()
 
+    # OOS 业绩评估
+    _run_report(eng)
+
+
+def _run_report(eng):
+    """运行 OOS 业绩评估并输出报告。"""
+    from model_core.vm import StackVM
+    from model_core.report import StrategyReport
+
+    if eng.best_formula is None:
+        print("未训练出有效公式，跳过业绩评估")
+        return
+
+    vm = StackVM()
+    alpha_values = vm.execute(eng.best_formula, eng.loader.feat_tensor)
+    if alpha_values is None:
+        print("公式执行失败，跳过业绩评估")
+        return
+
+    report = StrategyReport(eng.loader)
+    metrics, daily_ret, bench_daily, oos_dates = report.evaluate(alpha_values)
+    report.print_report(metrics, oos_dates)
+    report.plot_equity(daily_ret, bench_daily, oos_dates)
+
 
 def run_signal_only():
     """用已有的 best_ashare_strategy.json 直接生成信号。"""
+    from model_core.config import ModelConfig
     from model_core.data_loader import AshareDataLoader
     from model_core.vm import StackVM
     from model_core.signal_writer import SignalWriter
+    from model_core.report import StrategyReport
 
     formula_path = "best_ashare_strategy.json"
     if not os.path.exists(formula_path):
@@ -82,7 +108,13 @@ def run_signal_only():
         sys.exit(1)
 
     writer = SignalWriter(loader)
-    writer.write_signals(alpha_values)
+    writer.write_signals(alpha_values, ModelConfig.SIGNAL_DIR)
+
+    # OOS 业绩评估
+    report = StrategyReport(loader)
+    metrics, daily_ret, bench_daily, oos_dates = report.evaluate(alpha_values)
+    report.print_report(metrics, oos_dates)
+    report.plot_equity(daily_ret, bench_daily, oos_dates)
 
     # 打印今日 Top30
     print_top_picks(loader, alpha_values)
