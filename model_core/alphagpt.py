@@ -222,7 +222,7 @@ class AlphaGPT(nn.Module):
     def __init__(self):
         super().__init__()
         self.d_model = 64
-        self.features_list = ['RET', 'VOL', 'V_CHG', 'PV', 'TREND']
+        self.features_list = ['RET', 'RET5', 'VOL_CHG', 'AMT_RAT', 'TURN', 'PRESSURE', 'DEV', 'RSI', 'TREND']
         self.ops_list = [cfg[0] for cfg in OPS_CONFIG]
         
         self.vocab = self.features_list + self.ops_list

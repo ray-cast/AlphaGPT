@@ -3,25 +3,18 @@
 #
 # Installation:
 #   pip3 install -r requirements.txt
-#   # Or use: pip install -r requirements.txt (if pip points to Python 3)
-#
-# For experimental scripts (times.py, lord/experiment.py):
-#   pip3 install -r requirements-optional.txt
-#   # Or use: pip install -r requirements-optional.txt (if pip points to Python 3)
 
-# ===== Core Dependencies (Required for main pipeline) =====
+# ===== Core Dependencies =====
 
 # Deep Learning & Numerical Computing
 torch>=2.0.0          # PyTorch for model training and inference
 numpy>=1.24.0         # Numerical operations
 
-# Data Processing & Database
+# Data Processing
 pandas>=2.0.0         # Data manipulation and analysis
-sqlalchemy>=2.0.0     # Database ORM (PostgreSQL)
-asyncpg>=0.28.0       # Async PostgreSQL driver
 
-# Async HTTP & Network
-aiohttp>=3.9.0        # Async HTTP client (for Birdeye/Jupiter APIs)
+# A-Share Data Source
+tushare>=1.2.89       # Tushare Pro API for Chinese stock market data
 
 # Environment & Configuration
 python-dotenv>=1.0.0  # Load .env files
@@ -30,20 +23,7 @@ python-dotenv>=1.0.0  # Load .env files
 loguru>=0.7.0         # Structured logging
 tqdm>=4.66.0          # Progress bars
 
-# Solana Blockchain Integration
-# Note: Install solders first, then solana (as recommended by solana-py)
-solders>=0.18.0       # Solana Rust bindings (install first)
-solana>=0.30.0        # Solana Python SDK
-base58>=2.1.0         # Base58 encoding for Solana addresses
-
-# Dashboard & Visualization
-streamlit>=1.28.0     # Web dashboard framework
-plotly>=5.17.0        # Interactive charts
-
-# PostgreSQL
-psycopg2-binary>=2.9.10
-
-# ===== Optional Dependencies (For experimental scripts) =====
-# See requirements-optional.txt for:
-#   - matplotlib, seaborn (for lord/experiment.py visualization)
-#   - tushare (for times.py Chinese stock market data)
+# ===== Optional (visualization, dashboard) =====
+# matplotlib>=3.7.0
+# streamlit>=1.28.0
+# plotly>=5.17.0

@@ -53,6 +53,16 @@ htmlcov/
 # Jupyter Notebook
 .ipynb_checkpoints
 
+# A-Share data cache
+data/
+signals/
+*.parquet
+
+# Training output
+best_ashare_strategy.json
+training_history.json
+strategy_performance.png
+
 # OS
 .DS_Store
 Thumbs.db
