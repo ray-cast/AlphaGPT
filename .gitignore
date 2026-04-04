@@ -53,6 +53,9 @@ htmlcov/
 # Jupyter Notebook
 .ipynb_checkpoints
 
+# Meme
+meme/
+
 # A-Share data cache
 data/
 signals/
