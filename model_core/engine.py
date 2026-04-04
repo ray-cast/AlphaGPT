@@ -49,6 +49,8 @@ class AlphaEngine:
             "best_score": [],
             "stable_rank": [],
             "total_loss": [],
+            "best_formula": None,
+            "best_decoded": None,
         }
 
     def _get_strict_mask(self, open_slots, step):
@@ -215,6 +217,8 @@ class AlphaEngine:
             self.training_history["avg_reward"].append(avg_reward)
             self.training_history["best_score"].append(self.best_score)
             self.training_history["total_loss"].append(total_loss_val)
+            self.training_history["best_formula"] = self.best_formula
+            self.training_history["best_decoded"] = self._decode(self.best_formula) if self.best_formula else None
 
             with open("training_history.json", "w") as f:
                 json.dump(self.training_history, f, ensure_ascii=False, indent=2)
@@ -222,13 +226,6 @@ class AlphaEngine:
             pbar.set_postfix(postfix)
 
         # 保存结果
-        with open("best_ashare_strategy.json", "w") as f:
-            json.dump({
-                "formula": self.best_formula,
-                "score": self.best_score,
-                "decoded": self._decode(self.best_formula) if self.best_formula else None,
-            }, f, ensure_ascii=False, indent=2)
-
         print(f"\n训练完成!")
         print(f"  最佳得分: {self.best_score:.4f}")
         print(f"  最佳公式: {self._decode(self.best_formula)}")
