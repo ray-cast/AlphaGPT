@@ -19,7 +19,7 @@ class AlphaEngine:
         self.loader.load_data()
 
         self.model = AlphaGPT().to(ModelConfig.DEVICE)
-        self.opt = torch.optim.AdamW(self.model.parameters(), lr=1e-3)
+        self.opt = torch.optim.AdamW(self.model.parameters(), lr=3e-4, weight_decay=1e-5)
 
         # LoRD 正则化
         self.use_lord = use_lord_regularization
