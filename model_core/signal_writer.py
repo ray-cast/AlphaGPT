@@ -38,7 +38,7 @@ class SignalWriter:
         将 alpha 分值输出为 CSV 文件。
 
         Args:
-            alpha_values: [num_stocks, T] tensor，来自 StackVM
+            alpha_values: [num_stocks, T] tensor，来自 PrefixVM
             output_dir:   输出目录
         """
         os.makedirs(output_dir, exist_ok=True)

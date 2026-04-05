@@ -17,7 +17,7 @@ class ModelConfig:
 
     # ---------- 训练参数 ----------
     BATCH_SIZE = 1024
-    TRAIN_STEPS = 300
+    TRAIN_STEPS = 500
     MAX_FORMULA_LEN = 15
 
     # ---------- A股交易成本 ----------
@@ -34,6 +34,19 @@ class ModelConfig:
 
     # ---------- 训练/测试切分 ----------
     TRAIN_RATIO = 0.8           # 训练集占比（0.8 = 80% 训练 / 20% OOS）
+
+    # ---------- 早停 ----------
+    PATIENCE_LIMIT = 200           # 连续 N 步无新 best 则早停
+
+    # ---------- 探索与多样性 ----------
+    ENTROPY_COEF_START = 0.20       # 起始 entropy 系数
+    ENTROPY_COEF_END = 0.02        # 终止 entropy 系数
+    WARMUP_STEPS = 20              # 前 N 步强制均匀采样
+    LENGTH_BONUS_COEF = 0.1        # 每 log2(公式长度) 的 advantage 加成
+    DIVERSITY_TARGET = 0.3         # 低于此 unique ratio 时启用多样性惩罚
+    DIVERSITY_PENALTY = 0.5        # 重复公式的 advantage 惩罚强度
+    NOVELTY_BONUS = 0.2            # 首次出现公式的额外奖励
+    MIXED_STRUCTURE_BONUS = 0.3    # 时序+截面混合公式的额外奖励
 
     # ---------- 因子维度 ----------
     INPUT_DIM = 14

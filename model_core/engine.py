@@ -8,9 +8,9 @@ from tqdm import tqdm
 from .config import ModelConfig
 from .data_loader import AshareDataLoader
 from .alphagpt import AlphaGPT, NewtonSchulzLowRankDecay, StableRankMonitor
-from .vm import StackVM
+from .vm import PrefixVM
 from .backtest import AshareBacktest
-from .ops import OPS_CONFIG
+from .ops import OPS_CONFIG, TS_OP_INDICES, CS_OP_INDICES
 
 
 class AlphaEngine:
@@ -44,13 +44,14 @@ class AlphaEngine:
             self.lord_opt = None
             self.rank_monitor = None
 
-        self.vm = StackVM()
+        self.vm = PrefixVM()
         self.patience_counter = 0
-        self.patience_limit = 80  # 连续 N 步无新 best 则早停
+        self.patience_limit = ModelConfig.PATIENCE_LIMIT
         self.bt = AshareBacktest()
 
         self.best_score = -float("inf")
         self.best_formula = None
+        self.seen_formulas = set()
         self.training_history = {
             "step": [],
             "avg_reward": [],
@@ -122,11 +123,18 @@ class AlphaEngine:
             log_probs = []
             values = []
             tokens_list = []
+            open_slots_history = []
+            warmup_active = step < ModelConfig.WARMUP_STEPS
 
             for t in range(ModelConfig.MAX_FORMULA_LEN):
                 logits, val, _ = self.model(inp)
                 mask = self._get_strict_mask(open_slots, t)
-                dist = Categorical(logits=(logits + mask))
+                if warmup_active:
+                    # Warm-up 阶段：均匀采样（mask 仍生效保证合法性）
+                    uniform_logits = torch.zeros_like(logits)
+                    dist = Categorical(logits=(uniform_logits + mask))
+                else:
+                    dist = Categorical(logits=(logits + mask))
                 action = dist.sample()
 
                 log_probs.append(dist.log_prob(action))
@@ -141,6 +149,7 @@ class AlphaEngine:
                 delta = torch.where(is_op, op_delta, feat_delta)
                 delta[open_slots == 0] = 0
                 open_slots += delta
+                open_slots_history.append(open_slots.clone())
 
             seqs = torch.stack(tokens_list, dim=1)
 
@@ -180,6 +189,11 @@ class AlphaEngine:
                 )
                 combined_score = 0.6 * score + 0.4 * oos_score
 
+                # 新颖性奖励：首次出现的公式获得额外 bonus
+                if fkey not in self.seen_formulas:
+                    combined_score = combined_score + ModelConfig.NOVELTY_BONUS
+                    self.seen_formulas.add(fkey)
+
                 unique_map[fkey] = (combined_score.item(), ret_val)
                 rewards[i] = combined_score
 
@@ -206,12 +220,52 @@ class AlphaEngine:
             raw_normalized = raw_normalized.clamp(-1, 1)
 
             adv = 0.7 * rank_normalized + 0.3 * raw_normalized
+
+            # 公式长度 bonus：对数缩放，单 token 得 0，5 token 得 0.23
+            formula_lengths = torch.ones(bs, device=ModelConfig.DEVICE)
+            for i in range(bs):
+                vlen = self._valid_prefix_len(formulas[i], feat_count, arity_map)
+                formula_lengths[i] = max(vlen, 1)
+            length_bonus = torch.log2(formula_lengths) * ModelConfig.LENGTH_BONUS_COEF
+
+            # 多样性惩罚：对 batch 内重复出现的公式施加惩罚
+            diversity_bonus = torch.zeros(bs, device=ModelConfig.DEVICE)
+            if unique_ratio < ModelConfig.DIVERSITY_TARGET:
+                formula_counts = {}
+                for i in range(bs):
+                    vlen = self._valid_prefix_len(formulas[i], feat_count, arity_map)
+                    fkey = tuple(formulas[i][:vlen])
+                    formula_counts[fkey] = formula_counts.get(fkey, 0) + 1
+                for i in range(bs):
+                    vlen = self._valid_prefix_len(formulas[i], feat_count, arity_map)
+                    fkey = tuple(formulas[i][:vlen])
+                    count = formula_counts[fkey]
+                    if count > 1:
+                        diversity_bonus[i] = -ModelConfig.DIVERSITY_PENALTY * (count / bs)
+
+            # 混合结构奖励：同时包含时序+截面算子的公式获得额外 bonus
+            mixed_bonus = torch.zeros(bs, device=ModelConfig.DEVICE)
+            for i in range(bs):
+                vlen = self._valid_prefix_len(formulas[i], feat_count, arity_map)
+                tokens = formulas[i][:vlen]
+                op_indices = set(t - feat_count for t in tokens if t >= feat_count)
+                has_ts = bool(op_indices & TS_OP_INDICES)
+                has_cs = bool(op_indices & CS_OP_INDICES)
+                if has_ts and has_cs:
+                    mixed_bonus[i] = ModelConfig.MIXED_STRUCTURE_BONUS
+
+            adv = adv + length_bonus + diversity_bonus + mixed_bonus
             adv = adv - adv.mean()  # 去均值，确保 baselined
+
+            # Per-timestep advantage masking：只对 active steps 应用 advantage
+            open_slots_at_t = torch.stack(open_slots_history, dim=1)  # [bs, MAX_FORMULA_LEN]
 
             policy_loss = 0
             entropy = 0
             for t in range(len(log_probs)):
-                policy_loss += -log_probs[t] * adv
+                active = (open_slots_at_t[:, t] > 0).float()
+                step_adv = adv * active
+                policy_loss += -log_probs[t] * step_adv
                 entropy += -(log_probs[t].exp() * log_probs[t]).sum()
             policy_loss = policy_loss.mean()
 
@@ -219,10 +273,10 @@ class AlphaEngine:
             value_pred = torch.stack(values, 1).squeeze(-1).mean(dim=1)
             value_loss = F.mse_loss(value_pred, rewards.detach())
 
-            # Entropy bonus：线性退火 0.1 → 0.05，保持较强探索防止策略塌缩
+            # Entropy bonus：线性退火，去掉 / bs 使 entropy 系数真正有效
             progress = step / max(ModelConfig.TRAIN_STEPS - 1, 1)
-            entropy_coef = 0.1 * (1.0 - progress) + 0.05 * progress
-            loss = policy_loss + 0.5 * value_loss - entropy_coef * entropy / (len(log_probs) * bs)
+            entropy_coef = ModelConfig.ENTROPY_COEF_START * (1.0 - progress) + ModelConfig.ENTROPY_COEF_END * progress
+            loss = policy_loss + 0.5 * value_loss - entropy_coef * entropy / len(log_probs)
 
             self.opt.zero_grad()
             loss.backward()

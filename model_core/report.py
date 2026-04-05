@@ -23,7 +23,7 @@ class StrategyReport:
         在 OOS 区间评估策略表现。
 
         Args:
-            alpha_values: [num_stocks, T] 来自 StackVM 的 alpha 分值
+            alpha_values: [num_stocks, T] 来自 PrefixVM 的 alpha 分值
         Returns:
             metrics: dict，含 ann_ret / ann_vol / sharpe / max_dd / calmar / turnover
             daily_ret: np.ndarray [T_oos] 每日组合收益

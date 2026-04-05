@@ -19,7 +19,7 @@ class AshareBacktest:
     def evaluate(self, factors, raw_data, target_ret):
         """
         Args:
-            factors:    [num_stocks, T] alpha 信号（来自 StackVM）
+            factors:    [num_stocks, T] alpha 信号（来自 PrefixVM）
             raw_data:   dict，含 'turnover_rate', 'pct_chg'（如有）, 'vol', 'close'
             target_ret: [num_stocks, T] open-to-open 前向收益
         Returns:
