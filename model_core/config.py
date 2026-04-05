@@ -58,3 +58,11 @@ class ModelConfig:
     # ---------- 基本面过滤 ----------
     MAX_PE_TTM = 25                # 最高市盈率TTM（排除高估值；PE<=0 隐含排除亏损股即 EPS<=0）
     MIN_ROE = 0                    # 最低ROE（通过 PB/PE_TTM 近似；排除低效公司）
+
+    # ---------- SFT 热启动 ----------
+    SEED_FORMULA_NAMES = [         # 种子公式（名称格式，token ID 动态计算）
+        ("CS_RANK", ["P_VALUE"]),                   # 价值因子截面排名
+        ("CS_RANK", ["RET"]),                       # 动量截面排名
+        ("CROSS", ["P_VALUE", "RET"]),              # 价值×动量交互
+    ]
+    SFT_STEPS = 50                 # SFT 预训练步数（0 = 关闭热启动）
