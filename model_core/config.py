@@ -47,7 +47,7 @@ class ModelConfig:
     DIVERSITY_PENALTY = 0.5        # 重复公式的 advantage 惩罚强度
 
     # ---------- 因子维度 ----------
-    INPUT_DIM = 14
+    INPUT_DIM = 15
 
     # ---------- 信号输出 ----------
     SIGNAL_DIR = os.path.join(_PROJECT_ROOT, "signals")

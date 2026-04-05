@@ -42,7 +42,7 @@ def _rolling_mean(x, window):
 
 
 class FeatureEngineer:
-    INPUT_DIM = 14
+    INPUT_DIM = 15
 
     @staticmethod
     def compute_features(raw_dict):
@@ -126,6 +126,17 @@ class FeatureEngineer:
         # ---- 因子 13: 已实现波动率（REALIZED_VOL） ----
         realized_vol = torch.sqrt(vol_long + 1e-9)
 
+        # ---- 因子 14: 价值锚 P_value (EPS_TTM × ROE × 100) ----
+        # 源自 Lethon 大盘鸡策略的估值核心：盈利 × 资本回报 → 内在价值
+        # EPS_TTM = Close / PE_TTM,  ROE = PB / PE_TTM
+        pe_ttm = raw_dict.get("pe_ttm")
+        roe_raw = raw_dict.get("roe")
+        if pe_ttm is not None and roe_raw is not None:
+            eps_ttm = c / (pe_ttm + 1e-9)
+            p_value = eps_ttm * roe_raw * 100.0
+        else:
+            p_value = torch.zeros_like(c)
+
         features = torch.stack([
             robust_norm(ret),          # [0] RET
             robust_norm(ret5),         # [1] RET5
@@ -141,6 +152,7 @@ class FeatureEngineer:
             robust_norm(hl_range),     # [11] HL_RANGE
             robust_norm(close_pos),    # [12] CLOSE_POS
             robust_norm(realized_vol), # [13] REALIZED_VOL
+            robust_norm(p_value),      # [14] P_VALUE
         ], dim=1)
 
         # 清理 Inf（但保留 NaN 标记停牌日）
