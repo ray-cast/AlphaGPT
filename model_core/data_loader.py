@@ -139,8 +139,8 @@ class AshareDataLoader:
         # 复牌跳空极端收益截断（A股涨跌停 ±10%/±20%，超过 ±25% 视为异常）
         self.target_ret = self.target_ret.clamp(-0.25, 0.25)
 
-        # 7. 训练/测试切分
-        self.split_idx = int(len(self.dates) * ModelConfig.TRAIN_RATIO)
+        # 7. 报告切分点（仅用于 report / signal_writer 标注 OOS 区间）
+        self.split_idx = int(len(self.dates) * 0.8)
 
         N, T = self.raw_data_cache["close"].shape
         print(f"数据加载完成: {N} 只股票, {T} 个交易日, {self.feat_tensor.shape[1]} 个因子")

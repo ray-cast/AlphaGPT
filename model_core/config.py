@@ -32,14 +32,11 @@ class ModelConfig:
     MIN_LOT_SIZE = 100             # 最小交易单位（股）
     MIN_TURNOVER_RATE = 0.005      # 最低换手率（过滤停牌/流动性不足）
 
-    # ---------- 训练/测试切分 ----------
-    TRAIN_RATIO = 0.8           # 训练集占比（0.8 = 80% 训练 / 20% OOS）
-
     # ---------- 早停 ----------
-    PATIENCE_LIMIT = 200           # 连续 N 步无新 best 则早停
+    PATIENCE_LIMIT = 50           # 连续 N 步无新 best 则早停
 
     # ---------- 探索与多样性 ----------
-    ENTROPY_COEF_START = 0.20       # 起始 entropy 系数
+    ENTROPY_COEF_START = 0.20      # 起始 entropy 系数
     ENTROPY_COEF_END = 0.02        # 终止 entropy 系数
     WARMUP_STEPS = 20              # 前 N 步强制均匀采样
     LENGTH_BONUS_COEF = 0.1        # 每 log2(公式长度) 的 advantage 加成

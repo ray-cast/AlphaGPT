@@ -183,28 +183,22 @@ class AlphaEngine:
                     res, self.loader.raw_data_cache, self.loader.target_ret
                 )
 
-                # OOS 验证：混合 train + oos 得分防止过拟合
-                oos_score = self.bt.evaluate_oos(
-                    res, self.loader.raw_data_cache, self.loader.target_ret
-                )
-                combined_score = 0.6 * score + 0.4 * oos_score
-
                 # 新颖性奖励：首次出现的公式获得额外 bonus
+                final_score = score
                 if fkey not in self.seen_formulas:
-                    combined_score = combined_score + ModelConfig.NOVELTY_BONUS
+                    final_score = final_score + ModelConfig.NOVELTY_BONUS
                     self.seen_formulas.add(fkey)
 
-                unique_map[fkey] = (combined_score.item(), ret_val)
-                rewards[i] = combined_score
+                unique_map[fkey] = (final_score.item(), ret_val)
+                rewards[i] = final_score
 
-                if combined_score.item() > self.best_score:
-                    self.best_score = combined_score.item()
+                if final_score.item() > self.best_score:
+                    self.best_score = final_score.item()
                     self.best_formula = trimmed
                     self.patience_counter = 0  # 重置早停计数器
                     decoded = self._decode(trimmed)
                     tqdm.write(
-                        f"[!] New Best: Score {combined_score:.2f} "
-                        f"(train={score:.2f}, oos={oos_score:.2f}) | "
+                        f"[!] New Best: Score {final_score:.2f} "
                         f"CumRet {ret_val:.2%} | {decoded}"
                     )
 
