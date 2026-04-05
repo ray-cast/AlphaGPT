@@ -19,6 +19,7 @@ class SignalWriter:
         self.loader = loader
         self.stock_codes = loader.stock_codes
         self.dates = loader.dates
+        self.train_idx = loader.train_idx
         self.test_idx = loader.test_idx
 
         # 预计算市场趋势指标（close / MA60 - 1，经 tanh 压缩）
