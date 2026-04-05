@@ -43,11 +43,8 @@ class ModelConfig:
     ENTROPY_COEF_START = 0.20      # 起始 entropy 系数
     ENTROPY_COEF_END = 0.02        # 终止 entropy 系数
     WARMUP_STEPS = 20              # 前 N 步强制均匀采样
-    LENGTH_BONUS_COEF = 0.1        # 每 log2(公式长度) 的 advantage 加成
     DIVERSITY_TARGET = 0.3         # 低于此 unique ratio 时启用多样性惩罚
     DIVERSITY_PENALTY = 0.5        # 重复公式的 advantage 惩罚强度
-    NOVELTY_BONUS = 0.2            # 首次出现公式的额外奖励
-    MIXED_STRUCTURE_BONUS = 0.3    # 时序+截面混合公式的额外奖励
 
     # ---------- 因子维度 ----------
     INPUT_DIM = 14
@@ -56,3 +53,8 @@ class ModelConfig:
     SIGNAL_DIR = os.path.join(_PROJECT_ROOT, "signals")
     SIGNAL_THRESHOLD = 0.7         # sigmoid 阈值
     TOP_N_STOCKS = 10              # 截面选股数量
+    REBALANCE_RANK_GAP = 5         # 换仓排名阈值：新候选领先最弱持仓至少N名才调仓（0=关闭）
+
+    # ---------- 基本面过滤 ----------
+    MAX_PE_TTM = 25                # 最高市盈率TTM（排除高估值；PE<=0 隐含排除亏损股即 EPS<=0）
+    MIN_ROE = 0                    # 最低ROE（通过 PB/PE_TTM 近似；排除低效公司）

@@ -33,6 +33,8 @@ class AshareBacktest:
                             torch.zeros_like(factors, dtype=torch.bool))
         constituent = raw_data.get("constituent",
                             torch.ones_like(factors, dtype=torch.bool))
+        pe_ttm_full = raw_data.get("pe_ttm")
+        roe_full = raw_data.get("roe")
 
         # 按指定区间切片
         factors = factors[:, start_idx:end_idx]
@@ -40,6 +42,8 @@ class AshareBacktest:
         turnover_rate = turnover_rate[:, start_idx:end_idx]
         suspended = suspended[:, start_idx:end_idx]
         constituent = constituent[:, start_idx:end_idx]
+        pe_ttm = pe_ttm_full[:, start_idx:end_idx] if pe_ttm_full is not None else None
+        roe = roe_full[:, start_idx:end_idx] if roe_full is not None else None
 
         N_stocks, T_len = factors.shape
 
@@ -49,6 +53,16 @@ class AshareBacktest:
         scores[~valid_mask] = float('-inf')
         scores[turnover_rate <= self.min_turnover] = float('-inf')
 
+        # 基本面过滤：PE<=0 排除亏损（即 EPS<=0），PE>MAX 排除高估值，ROE<MIN 排除低效
+        if pe_ttm is not None:
+            bad_pe = (pe_ttm <= 0) | (pe_ttm > ModelConfig.MAX_PE_TTM)
+            bad_pe[torch.isnan(pe_ttm)] = False
+            scores[bad_pe] = float('-inf')
+        if roe is not None:
+            bad_roe = roe < ModelConfig.MIN_ROE
+            bad_roe[torch.isnan(roe) | torch.isinf(roe)] = False
+            scores[bad_roe] = float('-inf')
+
         # 市场状态判断：等权组合收益的 20 日均线（排除停牌）
         valid_target = target_ret.clone()
         valid_target[~valid_mask] = 0.0
@@ -56,12 +70,9 @@ class AshareBacktest:
         market_daily_ret = valid_target.sum(dim=0) / valid_count
         market_ma20 = self._rolling_mean_1d(market_daily_ret, 20)
 
-        # 一次性对所有交易日取 topk
-        _, topk_idx = scores.topk(self.top_n, dim=0)   # [top_n, T_len]
-        position = torch.zeros_like(factors)
-        position.scatter_(0, topk_idx, 1.0)
-        # 持仓中排除无效股票
-        position[~valid_mask] = 0.0
+        # 构建持仓矩阵（引入换手惩罚阈值）
+        rank_gap = ModelConfig.REBALANCE_RANK_GAP
+        position = self._build_position(scores, valid_mask, self.top_n, rank_gap)
 
         # 熊市减仓系数：市场弱势时收益按半仓计算（不影响实际换手）
         bear_mask = market_ma20 < 0
@@ -131,6 +142,91 @@ class AshareBacktest:
         fitness = sortino - dd_penalty - turnover_penalty - neg_return_penalty + ic_bonus
 
         return fitness, cum_ret.item()
+
+    @staticmethod
+    def _build_position(scores, valid_mask, top_n, rank_gap):
+        """构建持仓矩阵，引入换手惩罚阈值。
+
+        每日保留上一日持仓，只有当新候选股票的截面排名领先当前最弱持仓
+        超过 rank_gap 名时才换仓，以减少无谓换手和交易成本。
+
+        Args:
+            scores:     [N_stocks, T] 分数（无效股票已设 -inf）
+            valid_mask: [N_stocks, T] bool 有效股票掩码
+            top_n:      持仓数量
+            rank_gap:   换仓排名阈值（0 = 每日完全重选，即关闭阈值）
+        Returns:
+            position:   [N_stocks, T] 持仓矩阵（0/1）
+        """
+        N_stocks, T_len = scores.shape
+        position = torch.zeros_like(scores)
+
+        # ---- 阈值关闭：回退到原始 top-K 逻辑 ----
+        if rank_gap <= 0:
+            _, topk_idx = scores.topk(top_n, dim=0)
+            position.scatter_(0, topk_idx, 1.0)
+            position[~valid_mask] = 0.0
+            return position
+
+        # ---- 预计算每日排名（0 = 最佳排名）----
+        sorted_idx = scores.argsort(dim=0, descending=True)
+        rank_table = torch.zeros(scores.shape[0], scores.shape[1],
+                                 dtype=torch.long, device=scores.device)
+        rank_pos = torch.arange(N_stocks, device=scores.device)
+        rank_pos = rank_pos.unsqueeze(1).expand_as(scores)
+        rank_table.scatter_(0, sorted_idx, rank_pos)
+
+        # ---- 逐日构建持仓 ----
+        held = []                   # 当前持仓股票索引列表
+
+        for t in range(T_len):
+            today_valid = valid_mask[:, t]
+
+            # 移除不再有效的持仓（停牌/退成分等）
+            held = [i for i in held if today_valid[i]]
+            held_set = set(held)
+
+            # 补充空缺席位（首次建仓或持仓不足时）
+            missing = top_n - len(held)
+            if missing > 0:
+                k = min(top_n * 2, N_stocks)
+                _, candidates = scores[:, t].topk(k)
+                for idx in candidates.tolist():
+                    if missing <= 0:
+                        break
+                    if idx not in held_set:
+                        held.append(idx)
+                        held_set.add(idx)
+                        missing -= 1
+
+            # 尝试升级：仅当新候选排名领先最弱持仓超过阈值时换仓
+            if len(held) == top_n:
+                k = min(top_n * 2, N_stocks)
+                _, candidates = scores[:, t].topk(k)
+                today_ranks = rank_table[:, t]
+
+                weakest_idx = max(held, key=lambda i: today_ranks[i].item())
+                weakest_rank = today_ranks[weakest_idx].item()
+
+                for cand_idx in candidates.tolist():
+                    if cand_idx in held_set:
+                        continue
+                    cand_rank = today_ranks[cand_idx].item()
+                    if weakest_rank - cand_rank > rank_gap:
+                        # 换仓：移除最弱，加入候选
+                        held.remove(weakest_idx)
+                        held.append(cand_idx)
+                        held_set.remove(weakest_idx)
+                        held_set.add(cand_idx)
+                        weakest_idx = max(held, key=lambda i: today_ranks[i].item())
+                        weakest_rank = today_ranks[weakest_idx].item()
+                    else:
+                        break  # 候选按排名降序，后续更差
+
+            for idx in held:
+                position[idx, t] = 1.0
+
+        return position
 
     @staticmethod
     def _vectorized_ic(factors, target_ret, valid_mask, T_len, N_stocks):

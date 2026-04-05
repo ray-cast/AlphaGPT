@@ -54,7 +54,6 @@ class AlphaEngine:
 
         self.best_score = -float("inf")
         self.best_formula = None
-        self.seen_formulas = set()
         self.training_history = {
             "step": [],
             "avg_reward": [],
@@ -191,16 +190,10 @@ class AlphaEngine:
                     start_idx=self.valid_idx, end_idx=self.train_idx
                 )
 
-                # 新颖性奖励：首次出现的公式获得额外 bonus
-                final_score = score
-                if fkey not in self.seen_formulas:
-                    final_score = final_score + ModelConfig.NOVELTY_BONUS
-                    self.seen_formulas.add(fkey)
+                unique_map[fkey] = (score.item(), ret_val)
+                rewards[i] = score
 
-                unique_map[fkey] = (final_score.item(), ret_val)
-                rewards[i] = final_score
-
-                if final_score.item() > self.best_score:
+                if score.item() > self.best_score:
                     # 验证集检验（2017-2018 熊市压力测试）
                     val_score, _ = self.bt.evaluate(
                         res, self.loader.raw_data_cache, self.loader.target_ret,
@@ -217,12 +210,12 @@ class AlphaEngine:
                     if oos_score < -1.0:
                         # 测试集严重失效，跳过不更新 best
                         continue
-                    self.best_score = final_score.item()
+                    self.best_score = score.item()
                     self.best_formula = trimmed
                     self.patience_counter = 0  # 重置早停计数器
                     decoded = self._decode(trimmed)
                     tqdm.write(
-                        f"[!] New Best: Score {final_score:.2f} "
+                        f"[!] New Best: Score {score:.2f} "
                         f"(Val={val_score:.2f}, OOS={oos_score:.2f}) "
                         f"CumRet {ret_val:.2%} | {decoded}"
                     )
@@ -240,12 +233,6 @@ class AlphaEngine:
 
             adv = 0.7 * rank_normalized + 0.3 * raw_normalized
 
-            # 公式长度 bonus：使用已缓存的 formula_keys
-            formula_lengths = torch.ones(bs, device=ModelConfig.DEVICE)
-            for i in range(bs):
-                formula_lengths[i] = len(formula_keys[i]) if formula_keys[i] else 1
-            length_bonus = torch.log2(formula_lengths.clamp(min=1)) * ModelConfig.LENGTH_BONUS_COEF
-
             # 多样性惩罚：使用已缓存的 formula_keys
             diversity_bonus = torch.zeros(bs, device=ModelConfig.DEVICE)
             if unique_ratio < ModelConfig.DIVERSITY_TARGET:
@@ -258,7 +245,7 @@ class AlphaEngine:
                     if count > 1:
                         diversity_bonus[i] = -ModelConfig.DIVERSITY_PENALTY * (count / bs)
 
-            adv = adv + length_bonus + diversity_bonus
+            adv = adv + diversity_bonus
 
             # Critic baseline：用 value prediction 减去均值后的优势
             value_pred = torch.stack(values, 1).squeeze(-1).mean(dim=1)

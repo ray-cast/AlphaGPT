@@ -265,13 +265,13 @@ class TushareDownloader:
         if daily.empty:
             return pd.read_csv(csv_path) if os.path.exists(csv_path) else daily
 
-        # 获取换手率（需要 daily_basic 接口）
+        # 获取换手率 + 基本面指标（需要 daily_basic 接口）
         try:
             basic = self.pro.daily_basic(
                 ts_code=ts_code,
                 start_date=actual_start,
                 end_date=end_date,
-                fields="ts_code,trade_date,turnover_rate"
+                fields="ts_code,trade_date,turnover_rate,pe_ttm,pb"
             )
             if not basic.empty:
                 daily = daily.merge(basic, on=["ts_code", "trade_date"], how="left")

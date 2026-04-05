@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import torch
 
 from .config import ModelConfig
+from .backtest import AshareBacktest
 
 
 class StrategyReport:
@@ -69,13 +70,14 @@ class StrategyReport:
         market_ma20 = self._rolling_mean_1d(market_daily_ret, 20)
 
         position = torch.zeros_like(alpha_oos)
-        # 与 AshareBacktest 一致：排除停牌+低换手后 top-K 选股
+        # 与 AshareBacktest 一致：排除停牌+低换手后选股（含换手阈值）
         scores_filter = alpha_oos.clone()
         scores_filter[~valid_mask] = float('-inf')
         scores_filter[turnover_oos <= self.min_turnover] = float('-inf')
-        _, topk_idx = scores_filter.topk(min(self.top_n, N), dim=0)
-        position.scatter_(0, topk_idx, 1.0)
-        position[~valid_mask] = 0.0
+        rank_gap = ModelConfig.REBALANCE_RANK_GAP
+        position = AshareBacktest._build_position(
+            scores_filter, valid_mask, min(self.top_n, N), rank_gap
+        )
 
         # 熊市减仓系数：市场弱势时收益按半仓计算（不影响实际换手）
         bear_mask = market_ma20 < 0

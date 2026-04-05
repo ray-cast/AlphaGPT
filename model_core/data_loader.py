@@ -124,6 +124,17 @@ class AshareDataLoader:
             vol_ratio = vol / (vol_ma20 + 1e-9)
             self.raw_data_cache["turnover_rate"] = vol_ratio
 
+        # 基本面指标：pe_ttm、pb（来自 daily_basic，旧数据可能缺失则跳过）
+        if "pe_ttm" in master.columns:
+            self.raw_data_cache["pe_ttm"] = to_tensor("pe_ttm")
+        if "pb" in master.columns:
+            self.raw_data_cache["pb"] = to_tensor("pb")
+        # 隐含 ROE ≈ PB / PE_TTM（无需额外下载季报数据）
+        pe_ttm_t = self.raw_data_cache.get("pe_ttm")
+        pb_t = self.raw_data_cache.get("pb")
+        if pe_ttm_t is not None and pb_t is not None:
+            self.raw_data_cache["roe"] = pb_t / pe_ttm_t
+
         self.dates = sorted(master["trade_date"].unique())
 
         # 4.5 按配置的日期范围裁剪
