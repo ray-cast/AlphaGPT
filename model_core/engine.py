@@ -201,6 +201,14 @@ class AlphaEngine:
                 rewards[i] = final_score
 
                 if final_score.item() > self.best_score:
+                    # 验证集检验（2017-2018 熊市压力测试）
+                    val_score, _ = self.bt.evaluate(
+                        res, self.loader.raw_data_cache, self.loader.target_ret,
+                        start_idx=0, end_idx=self.valid_idx
+                    )
+                    if val_score < -1.0:
+                        # 熊市验证集严重失效，跳过不更新 best
+                        continue
                     # OOS 测试集验证：过拟合保护
                     oos_score, oos_ret = self.bt.evaluate(
                         res, self.loader.raw_data_cache, self.loader.target_ret,
@@ -215,7 +223,7 @@ class AlphaEngine:
                     decoded = self._decode(trimmed)
                     tqdm.write(
                         f"[!] New Best: Score {final_score:.2f} "
-                        f"(OOS={oos_score:.2f}) "
+                        f"(Val={val_score:.2f}, OOS={oos_score:.2f}) "
                         f"CumRet {ret_val:.2%} | {decoded}"
                     )
 
