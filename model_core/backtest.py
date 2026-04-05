@@ -29,16 +29,19 @@ class AshareBacktest:
         """
         turnover_rate = raw_data.get("turnover_rate",
                             torch.zeros_like(factors))
+        suspended = raw_data.get("suspended",
+                            torch.zeros_like(factors, dtype=torch.bool))
 
         # 按指定区间切片
         factors = factors[:, start_idx:end_idx]
         target_ret = target_ret[:, start_idx:end_idx]
         turnover_rate = turnover_rate[:, start_idx:end_idx]
+        suspended = suspended[:, start_idx:end_idx]
 
         N_stocks, T_len = factors.shape
 
-        # 排除停牌股票（NaN 信号或 NaN target_ret）
-        valid_mask = ~(torch.isnan(factors) | torch.isnan(target_ret))
+        # 排除停牌股票（NaN 信号、NaN target_ret、或停牌掩码标记）
+        valid_mask = ~(torch.isnan(factors) | torch.isnan(target_ret) | suspended)
         scores = factors.clone()
         scores[~valid_mask] = float('-inf')
         scores[turnover_rate <= self.min_turnover] = float('-inf')
@@ -74,8 +77,8 @@ class AshareBacktest:
         gross_pnl = position * target_ret
         net_pnl = gross_pnl - tx_cost
 
-        # 每天 portfolio 收益（持仓股票的平均收益）
-        daily_pnl = net_pnl.sum(dim=0) / (self.top_n + 1e-9)
+        # 每天 portfolio 收益（按实际持仓权重归一化，熊市减仓时分母会相应减小）
+        daily_pnl = net_pnl.sum(dim=0) / (position.sum(dim=0).clamp(min=1))
 
         # ---- Fitness 计算 ----
         # 1) Sortino 比率作为主指标

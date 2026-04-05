@@ -74,12 +74,20 @@ class AshareDataLoader:
         master = master[master["trade_date"].isin(common_dates)]
 
         # 4. Pivot 为 [stocks, T] 的 tensor
+        # 先用 close 构建停牌掩码（ffill 之前），再统一做前向填充
+        close_pivot = master.pivot(index="trade_date", columns="ts_code", values="close")
+        close_pivot = close_pivot.sort_index()
+        close_pivot = close_pivot[[c for c in loaded_codes if c in close_pivot.columns]]
+        # 停牌日 close 为 NaN → 记录掩码
+        suspended_mask = torch.tensor(
+            close_pivot.isna().values.T, dtype=torch.bool, device=ModelConfig.DEVICE
+        )
+
         def to_tensor(col_name):
             pivot = master.pivot(index="trade_date", columns="ts_code", values=col_name)
             pivot = pivot.sort_index()
-            # 按加载顺序排列列
             pivot = pivot[[c for c in loaded_codes if c in pivot.columns]]
-            # 停牌/缺失保留 NaN，不填 0（避免产生虚假收益率）
+            # 停牌/缺失用最近一个交易日数据填充
             pivot = pivot.ffill()
             return torch.tensor(pivot.values.T, dtype=torch.float32, device=ModelConfig.DEVICE)
 
@@ -90,6 +98,7 @@ class AshareDataLoader:
             "close":  to_tensor("close"),
             "vol":    to_tensor("vol"),
             "amount": to_tensor("amount"),
+            "suspended": suspended_mask,   # [N, T] bool, True=停牌
         }
 
         # turnover_rate 可能不存在于早期数据
@@ -126,15 +135,16 @@ class AshareDataLoader:
 
         # 6. 计算 target_ret（open-to-open，T+1 合规）
         op = self.raw_data_cache["open"]
+        suspended = self.raw_data_cache["suspended"]  # [N, T] 停牌掩码（ffill 前记录）
         op_next = torch.roll(op, -1, dims=1)
         op_next2 = torch.roll(op, -2, dims=1)
         self.target_ret = op_next2 / (op_next + 1e-9) - 1.0
         self.target_ret[:, -2:] = 0.0
-        # 停牌日（open 为 NaN）的 target_ret 设为 0，排除虚假收益
-        suspended = torch.isnan(op)
+        # 停牌日的 target_ret 设为 0（ffill 后价格不变→收益≈0，但显式清零更安全）
         self.target_ret[suspended] = 0.0
-        # 下一个交易日也停牌的，其 target_ret 也无意义
-        suspended_next = torch.isnan(op_next)
+        # T+1 日也停牌的，open-to-open 收益无意义
+        suspended_next = torch.roll(suspended, -1, dims=1)
+        suspended_next[:, -1] = False
         self.target_ret[suspended_next] = 0.0
         # 复牌跳空极端收益截断（A股涨跌停 ±10%/±20%，超过 ±25% 视为异常）
         self.target_ret = self.target_ret.clamp(-0.25, 0.25)

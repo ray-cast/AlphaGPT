@@ -42,16 +42,20 @@ class StrategyReport:
         turnover_rate = loader.raw_data_cache.get(
             "turnover_rate", torch.zeros_like(alpha_values)
         )
+        suspended_all = loader.raw_data_cache.get(
+            "suspended", torch.zeros_like(alpha_values, dtype=torch.bool)
+        )
 
         alpha_oos = alpha_values[:, start:end]
         target_oos = target_ret[:, start:end]
         turnover_oos = turnover_rate[:, start:end]
+        suspended_oos = suspended_all[:, start:end]
         oos_dates = loader.dates[start:end]
 
         N, T = alpha_oos.shape
 
-        # 排除停牌（NaN 信号或 NaN 收益）
-        valid_mask = ~(torch.isnan(alpha_oos) | torch.isnan(target_oos))
+        # 排除停牌（NaN 信号、NaN 收益、或停牌掩码标记）
+        valid_mask = ~(torch.isnan(alpha_oos) | torch.isnan(target_oos) | suspended_oos)
 
         # 构建持仓（复用 AshareBacktest 的逻辑，含动态仓位管理）
         valid_target = target_oos.clone()
@@ -61,17 +65,17 @@ class StrategyReport:
         market_ma20 = self._rolling_mean_1d(market_daily_ret, 20)
 
         position = torch.zeros_like(alpha_oos)
-        for t in range(T):
-            alpha_t = alpha_oos[:, t].clone()
-            # 排除停牌和低换手
-            valid_t = valid_mask[:, t] & (turnover_oos[:, t] > self.min_turnover)
-            alpha_t[~valid_t] = -float("inf")
-            k = min(self.top_n, valid_t.sum().int().item())
-            if market_ma20[t] < 0:
-                k = max(k // 2, 0)
-            if k > 0:
-                _, topk_idx = torch.topk(alpha_t, k)
-                position[topk_idx, t] = 1.0
+        # 与 AshareBacktest 一致：排除停牌+低换手后 top-K 选股
+        scores_filter = alpha_oos.clone()
+        scores_filter[~valid_mask] = float('-inf')
+        scores_filter[turnover_oos <= self.min_turnover] = float('-inf')
+        _, topk_idx = scores_filter.topk(min(self.top_n, N), dim=0)
+        position.scatter_(0, topk_idx, 1.0)
+        position[~valid_mask] = 0.0
+
+        # 熊市减仓：与 backtest 一致，权重减半（不减少持股数）
+        bear_mask = market_ma20 < 0
+        position[:, bear_mask] *= 0.5
 
         # 换手
         prev_pos = torch.roll(position, 1, dims=1)
@@ -80,11 +84,11 @@ class StrategyReport:
         avg_cost = (self.buy_cost + self.sell_cost) / 2.0
         tx_cost = turnover * avg_cost
 
-        # 组合收益（绝对收益）
+        # 组合收益（绝对收益，按实际持仓权重归一化）
         gross_pnl = position * target_oos
         net_pnl = gross_pnl - tx_cost
 
-        daily_ret = net_pnl.sum(dim=0).cpu().numpy() / (self.top_n + 1e-9)
+        daily_ret = net_pnl.sum(dim=0).cpu().numpy() / (position.sum(dim=0).clamp(min=1).cpu().numpy())
         bench_daily = market_daily_ret.cpu().numpy()  # 已排除停牌的等权市场均值
 
         # 统计

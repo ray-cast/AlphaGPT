@@ -67,8 +67,14 @@ def _op_gate(condition: torch.Tensor, x: torch.Tensor, y: torch.Tensor) -> torch
 
 @torch.jit.script
 def _op_jump(x: torch.Tensor) -> torch.Tensor:
-    mean = x.mean(dim=1, keepdim=True)
-    std = x.std(dim=1, keepdim=True) + 1e-6
+    # expanding window z-score，避免未来数据泄漏
+    N, T = x.shape
+    cumsum = torch.cumsum(x, dim=1)
+    cumsum2 = torch.cumsum(x * x, dim=1)
+    arange = torch.arange(1, T + 1, device=x.device, dtype=x.dtype).unsqueeze(0)
+    mean = cumsum / arange
+    var = cumsum2 / arange - mean * mean
+    std = torch.sqrt(var.clamp(min=1e-6))
     z = (x - mean) / std
     return torch.relu(z - 3.0)
 
