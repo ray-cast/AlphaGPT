@@ -10,6 +10,7 @@ class ModelConfig:
 
     # ---------- 数据路径 ----------
     DATA_DIR = os.path.join(_PROJECT_ROOT, "data")
+    BENCHMARK_INDEX = "000300.SH"   # 沪深300指数代码（回测基准）
 
     # ---------- 数据集日期划分 ----------
     DATA_START_DATE = "20170101"         # 数据起始日期

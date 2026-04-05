@@ -31,17 +31,20 @@ class AshareBacktest:
                             torch.zeros_like(factors))
         suspended = raw_data.get("suspended",
                             torch.zeros_like(factors, dtype=torch.bool))
+        constituent = raw_data.get("constituent",
+                            torch.ones_like(factors, dtype=torch.bool))
 
         # 按指定区间切片
         factors = factors[:, start_idx:end_idx]
         target_ret = target_ret[:, start_idx:end_idx]
         turnover_rate = turnover_rate[:, start_idx:end_idx]
         suspended = suspended[:, start_idx:end_idx]
+        constituent = constituent[:, start_idx:end_idx]
 
         N_stocks, T_len = factors.shape
 
-        # 排除停牌股票（NaN 信号、NaN target_ret、或停牌掩码标记）
-        valid_mask = ~(torch.isnan(factors) | torch.isnan(target_ret) | suspended)
+        # 排除停牌/非成分股（NaN 信号、NaN target_ret、停牌、或非时点成分股）
+        valid_mask = ~(torch.isnan(factors) | torch.isnan(target_ret) | suspended) & constituent
         scores = factors.clone()
         scores[~valid_mask] = float('-inf')
         scores[turnover_rate <= self.min_turnover] = float('-inf')

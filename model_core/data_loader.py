@@ -1,4 +1,5 @@
 import os
+import bisect
 import glob
 import pandas as pd
 import torch
@@ -9,7 +10,7 @@ from .factors import FeatureEngineer
 class AshareDataLoader:
     """从 CSV 文件加载沪深300成分股日线数据，转为 PyTorch tensors。"""
 
-    def __init__(self, data_dir: str = None, max_stocks: int = 300):
+    def __init__(self, data_dir: str = None, max_stocks: int = 600):
         self.data_dir = data_dir or ModelConfig.DATA_DIR
         self.max_stocks = max_stocks
         self.feat_tensor = None        # [num_stocks, N_features, T]
@@ -20,11 +21,12 @@ class AshareDataLoader:
         self.valid_idx = None          # 验证集截止索引（不含）
         self.train_idx = None          # 训练集截止索引（不含）
         self.test_idx = None           # 测试集截止索引（不含）
+        self.benchmark_ret = None      # [T] 基准指数日收益率
 
     def load_data(self):
         print("从 CSV 加载A股数据...")
 
-        # 1. 读取成分股列表
+        # 1. 读取成分股列表（当前 + 历史，消除幸存者偏差）
         const_path = os.path.join(self.data_dir, "constituents", "hs300.csv")
         if not os.path.exists(const_path):
             raise FileNotFoundError(
@@ -33,7 +35,20 @@ class AshareDataLoader:
             )
         const_df = pd.read_csv(const_path)
         col = "con_code" if "con_code" in const_df.columns else "ts_code"
-        all_codes = const_df[col].dropna().unique().tolist()
+        current_codes = set(const_df[col].dropna().unique().tolist())
+
+        # 读取历史成分股（全部时期并集）
+        hist_path = os.path.join(self.data_dir, "constituents", "hs300_history.csv")
+        hist_df = None
+        all_codes = list(current_codes)
+        if os.path.exists(hist_path):
+            hist_df = pd.read_csv(hist_path)
+            h_col = "con_code" if "con_code" in hist_df.columns else "ts_code"
+            hist_codes = set(hist_df[h_col].dropna().unique().tolist())
+            all_codes = sorted(current_codes | hist_codes)
+            print(f"  当前成分股 {len(current_codes)} 只 + 历史 {len(hist_codes)} 只 → 合并 {len(all_codes)} 只")
+        else:
+            print(f"  [WARN] 未找到历史成分股文件 {hist_path}，仅使用当前成分股（存在幸存者偏差）")
 
         # 2. 逐个读取 CSV，合并为 master DataFrame
         daily_dir = os.path.join(self.data_dir, "daily")
@@ -121,6 +136,22 @@ class AshareDataLoader:
                 for key in self.raw_data_cache:
                     self.raw_data_cache[key] = self.raw_data_cache[key][:, s:]
 
+        # 4.6 构建时点成分股掩码（消除幸存者偏差）
+        if hist_df is not None:
+            constituent_mask = self._build_constituent_mask(
+                hist_df, loaded_codes, self.dates
+            )
+            self.raw_data_cache["constituent"] = constituent_mask
+        else:
+            # 无历史数据时退化为全 True（与旧行为一致）
+            N, T = self.raw_data_cache["close"].shape
+            self.raw_data_cache["constituent"] = torch.ones(
+                N, T, dtype=torch.bool, device=ModelConfig.DEVICE
+            )
+
+        # 4.7 加载基准指数日收益率
+        self._load_benchmark_returns()
+
         # 5. 计算因子
         self.feat_tensor = FeatureEngineer.compute_features(self.raw_data_cache)
 
@@ -179,3 +210,107 @@ class AshareDataLoader:
         print(f"  验证集: {self.dates[0]} ~ {self.dates[self.valid_idx-1]} ({self.valid_idx} 天)")
         print(f"  训练集: {self.dates[self.valid_idx]} ~ {self.dates[self.train_idx-1]} ({self.train_idx - self.valid_idx} 天)")
         print(f"  测试集: {self.dates[self.train_idx]} ~ {self.dates[self.test_idx-1]} ({self.test_idx - self.train_idx} 天)")
+        print(f"  基准指数: {ModelConfig.BENCHMARK_INDEX}"
+              f"{'（已加载）' if self.benchmark_ret is not None else '（未加载，使用等权基准）'}")
+
+    def _load_benchmark_returns(self):
+        """加载沪深300指数日收益率，与 self.dates 对齐。"""
+        index_path = os.path.join(
+            self.data_dir, "constituents", "hs300_index.csv"
+        )
+        if not os.path.exists(index_path):
+            print("  [WARN] 未找到HS300指数数据，基准将使用等权组合")
+            self.benchmark_ret = None
+            return
+
+        idx_df = pd.read_csv(index_path)
+        if idx_df.empty or "trade_date" not in idx_df.columns:
+            print("  [WARN] HS300指数数据为空，基准将使用等权组合")
+            self.benchmark_ret = None
+            return
+
+        # 使用 pct_chg 列（日涨跌幅 %）或自行从 close 计算
+        if "pct_chg" in idx_df.columns:
+            idx_df["daily_ret"] = idx_df["pct_chg"].astype(float) / 100.0
+        elif "close" in idx_df.columns:
+            idx_df = idx_df.sort_values("trade_date")
+            idx_df["daily_ret"] = idx_df["close"].astype(float).pct_change()
+            idx_df = idx_df.dropna(subset=["daily_ret"])
+        else:
+            print("  [WARN] HS300指数数据无 pct_chg 或 close 列")
+            self.benchmark_ret = None
+            return
+
+        # 与 self.dates 对齐：构建 date → daily_ret 映射
+        idx_map = dict(zip(
+            idx_df["trade_date"].astype(str),
+            idx_df["daily_ret"].astype(float)
+        ))
+        T = len(self.dates)
+        bench = torch.zeros(T, dtype=torch.float32, device=ModelConfig.DEVICE)
+        matched = 0
+        for i, d in enumerate(self.dates):
+            ret = idx_map.get(str(d), 0.0)
+            bench[i] = ret
+            if str(d) in idx_map:
+                matched += 1
+
+        self.benchmark_ret = bench
+        print(f"  HS300指数基准: {matched}/{T} 个交易日已匹配")
+
+    def _build_constituent_mask(self, hist_df, loaded_codes, all_dates):
+        """构建时点成分股掩码 [num_stocks, T]。
+
+        对每个交易日，找到最近一次指数调整日，标记该股票是否为成分股。
+
+        Args:
+            hist_df: 历史成分股 DataFrame（含 trade_date, con_code 列）
+            loaded_codes: 已加载的股票代码列表（与 tensor dim=0 对齐）
+            all_dates: 所有交易日列表（与 tensor dim=1 对齐）
+        Returns:
+            constituent_mask: [N, T] bool tensor，True=该股票在该日期是沪深300成分股
+        """
+        h_col = "con_code" if "con_code" in hist_df.columns else "ts_code"
+
+        # 按调整日分组：{rebalance_date: set(con_codes)}
+        rebalance_dates = sorted(str(d) for d in hist_df["trade_date"].unique())
+        rebalance_map = {}
+        for rd in rebalance_dates:
+            rebalance_map[rd] = set(
+                hist_df.loc[hist_df["trade_date"].astype(str) == rd, h_col].tolist()
+            )
+
+        N = len(loaded_codes)
+        T = len(all_dates)
+        mask = torch.zeros(N, T, dtype=torch.bool, device=ModelConfig.DEVICE)
+
+        # 向量化构建：预计算每个交易日的最近调整日索引，按调整日分组批量处理
+        code_to_idx = {code: i for i, code in enumerate(loaded_codes)}
+        from collections import defaultdict
+        rd_to_t_indices = defaultdict(list)
+        uncovered_t = []  # 没有匹配到调整日的交易日
+        for t, date in enumerate(all_dates):
+            idx = bisect.bisect_right(rebalance_dates, str(date)) - 1
+            if idx >= 0:
+                rd_to_t_indices[idx].append(t)
+            else:
+                uncovered_t.append(t)
+
+        for rd_idx, t_indices in rd_to_t_indices.items():
+            active_codes = rebalance_map[rebalance_dates[rd_idx]]
+            for code in active_codes:
+                if code in code_to_idx:
+                    i = code_to_idx[code]
+                    mask[i, t_indices] = True
+
+        # 对没有匹配到调整日的交易日（数据不足），回退为全 True
+        if uncovered_t:
+            mask[:, uncovered_t] = True
+            print(f"  [WARN] {len(uncovered_t)} 个交易日无调整日数据，回退为全部股票可用")
+
+        # 打印诊断信息
+        active_counts = mask.float().sum(dim=0)
+        print(f"  PIT成分股掩码: 平均每日 {active_counts.mean():.0f} 只成分股 "
+              f"(最少 {active_counts.min():.0f}, 最多 {active_counts.max():.0f})")
+
+        return mask

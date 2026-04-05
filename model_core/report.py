@@ -45,17 +45,21 @@ class StrategyReport:
         suspended_all = loader.raw_data_cache.get(
             "suspended", torch.zeros_like(alpha_values, dtype=torch.bool)
         )
+        constituent_all = loader.raw_data_cache.get(
+            "constituent", torch.ones_like(alpha_values, dtype=torch.bool)
+        )
 
         alpha_oos = alpha_values[:, start:end]
         target_oos = target_ret[:, start:end]
         turnover_oos = turnover_rate[:, start:end]
         suspended_oos = suspended_all[:, start:end]
+        constituent_oos = constituent_all[:, start:end]
         oos_dates = loader.dates[start:end]
 
         N, T = alpha_oos.shape
 
-        # 排除停牌（NaN 信号、NaN 收益、或停牌掩码标记）
-        valid_mask = ~(torch.isnan(alpha_oos) | torch.isnan(target_oos) | suspended_oos)
+        # 排除停牌/非成分股（NaN 信号、NaN 收益、停牌、或非时点成分股）
+        valid_mask = ~(torch.isnan(alpha_oos) | torch.isnan(target_oos) | suspended_oos) & constituent_oos
 
         # 构建持仓（复用 AshareBacktest 的逻辑，含动态仓位管理）
         valid_target = target_oos.clone()
@@ -90,7 +94,12 @@ class StrategyReport:
         net_pnl = gross_pnl - tx_cost
 
         daily_ret = net_pnl.sum(dim=0).cpu().numpy() / (position.sum(dim=0).clamp(min=1).cpu().numpy())
-        bench_daily = market_daily_ret.cpu().numpy()  # 已排除停牌的等权市场均值
+
+        # 基准：优先使用真实 HS300 指数日收益率，退化为等权基准
+        if self.loader.benchmark_ret is not None:
+            bench_daily = self.loader.benchmark_ret[start:end].cpu().numpy()
+        else:
+            bench_daily = market_daily_ret.cpu().numpy()  # 等权组合（旧逻辑）
 
         # 统计
         metrics = self._compute_metrics(daily_ret, bench_daily, turnover, T, oos_dates)
@@ -211,7 +220,8 @@ class StrategyReport:
 
         # --- 上图：净值曲线 ---
         ax1.plot(x, equity, label="Strategy (Open-to-Open)", linewidth=1.5)
-        ax1.plot(x, bench_equity, label="Benchmark (HS300 equal-wt)", alpha=0.5, linewidth=1)
+        bench_label = "HS300 Index" if self.loader.benchmark_ret is not None else "HS300 equal-wt"
+        ax1.plot(x, bench_equity, label=f"Benchmark ({bench_label})", alpha=0.5, linewidth=1)
 
         # 标注最大回撤区间
         dd_peak_idx = int(np.argmax(dd))
