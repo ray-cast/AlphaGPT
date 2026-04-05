@@ -335,10 +335,8 @@ class AlphaEngine:
             self.training_history["best_formula"] = self.best_formula
             self.training_history["best_decoded"] = self._decode(self.best_formula) if self.best_formula else None
 
-            # 每 10 步或最后一步写盘，减少 I/O 开销
-            if step % 10 == 0 or step == ModelConfig.TRAIN_STEPS - 1:
-                with open("training_history.json", "w") as f:
-                    json.dump(self.training_history, f, ensure_ascii=False, indent=2)
+            with open("training_history.json", "w") as f:
+                json.dump(self.training_history, f, ensure_ascii=False, indent=2)
 
             # 早停检查
             self.patience_counter += 1
@@ -381,7 +379,10 @@ class AlphaEngine:
         sft_opt = torch.optim.AdamW(self.model.parameters(), lr=1e-3)
         self.model.train()
 
+        feat_count = len(self.model.features_list)
+
         for step in range(self.sft_steps):
+            sft_opt.zero_grad()
             total_loss = 0.0
             for formula in all_seeds:
                 # 自回归教师强制：逐步输入 prefix，预测下一个 token
@@ -395,35 +396,43 @@ class AlphaEngine:
 
                 loss = loss / len(formula)
                 total_loss += loss.item()
-                sft_opt.zero_grad()
-                loss.backward()
-                sft_opt.step()
+                loss.backward()  # 梯度累积，不做 step
+
+            total_loss = total_loss / len(all_seeds)
+            sft_opt.step()  # 所有公式梯度平均后统一更新
 
             if (step + 1) % 10 == 0:
-                avg = total_loss / len(all_seeds)
-                print(f"    [SFT] Step {step+1}/{self.sft_steps}, avg loss: {avg:.4f}")
+                print(f"    [SFT] Step {step+1}/{self.sft_steps}, avg loss: {total_loss:.4f}")
 
-        # 验证：检查模型是否能生成种子公式
+        # 验证：检查模型是否能通过 greedy decoding 复现每个种子公式
         self.model.eval()
         with torch.no_grad():
-            inp = torch.zeros((1, 1), dtype=torch.long, device=ModelConfig.DEVICE)
-            generated = []
-            for t in range(max_len):
-                logits, _, _ = self.model(inp)
-                next_token = logits.argmax(dim=-1).item()
-                generated.append(next_token)
-                inp = torch.cat([inp, torch.tensor([[next_token]], device=ModelConfig.DEVICE)], dim=1)
-                # 简易检查：如果生成了一个完整的表达式就停止
-                open_slots = 1
-                for tok in generated:
-                    if tok < len(self.model.features_list):
-                        open_slots -= 1
-                    elif tok - len(self.model.features_list) < len(OPS_CONFIG):
-                        open_slots += OPS_CONFIG[tok - len(self.model.features_list)][2] - 1
+            for formula in all_seeds:
+                inp = torch.zeros((1, 1), dtype=torch.long, device=ModelConfig.DEVICE)
+                generated = []
+                for _ in range(max_len):
+                    logits, _, _ = self.model(inp)
+                    next_token = logits.argmax(dim=-1).item()
+                    generated.append(next_token)
+                    inp = torch.cat([inp, torch.tensor([[next_token]], device=ModelConfig.DEVICE)], dim=1)
+                    # 检查是否生成了一个完整的表达式
+                    open_slots = 1
+                    for tok in generated:
+                        if tok < feat_count:
+                            open_slots -= 1
+                        else:
+                            op_idx = tok - feat_count
+                            if op_idx < len(OPS_CONFIG):
+                                open_slots += OPS_CONFIG[op_idx][2] - 1
                     if open_slots <= 0:
-                        break
+                        break  # 跳出外层 for 循环
+
+                match = generated == list(formula)
+                status = "OK" if match else "MISMATCH"
+                print(f"    [SFT-Verify] {status}: expected {self._decode(formula)}, "
+                      f"got {self._decode(generated)}")
+
         self.model.train()
-        print(f"  [SFT] 预训练完成，模型默认输出: {self._decode(generated[:min(len(generated), max_len)])}")
 
     def _decode(self, tokens):
         """将 token 序列解码为可读公式字符串。"""
