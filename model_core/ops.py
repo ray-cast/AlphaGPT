@@ -114,4 +114,6 @@ OPS_CONFIG = [
     # 时序算子：固定窗口版本（VM 无法传参数，故预定义常用窗口）
     ('TS_RANK20', lambda x: _ts_rank(x, 20), 1),
     ('TS_ZSCORE20', lambda x: _ts_zscore(x, 20), 1),
+    ('TS_MA20', lambda x: _ts_decay_linear(x, 20), 1),
+    ('TS_DELTA5', lambda x: _ts_delta(x, 5), 1),
 ]

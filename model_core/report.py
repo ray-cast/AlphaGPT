@@ -93,10 +93,10 @@ class StrategyReport:
         bench_daily = market_daily_ret.cpu().numpy()  # 已排除停牌的等权市场均值
 
         # 统计
-        metrics = self._compute_metrics(daily_ret, bench_daily, turnover, T)
+        metrics = self._compute_metrics(daily_ret, bench_daily, turnover, T, oos_dates)
         return metrics, daily_ret, bench_daily, oos_dates
 
-    def _compute_metrics(self, daily_ret, bench_daily, turnover, T):
+    def _compute_metrics(self, daily_ret, bench_daily, turnover, T, oos_dates=None):
         equity = np.cumprod(1 + daily_ret)
         bench_equity = np.cumprod(1 + bench_daily)
 
@@ -105,10 +105,29 @@ class StrategyReport:
         ann_vol = np.std(daily_ret) * np.sqrt(252)
         sharpe = (ann_ret - 0.02) / (ann_vol + 1e-6)
 
-        # 最大回撤
+        # 最大回撤及区间
         dd = 1 - equity / np.maximum.accumulate(equity)
         max_dd = np.max(dd)
+        max_dd_end = int(np.argmax(dd))
+        running_max = np.maximum.accumulate(equity)
+        peak_before_trough = running_max[max_dd_end]
+        # 回撤起点 = 该谷值之前最后一个净值为 peak_before_trough 的位置
+        peak_indices = np.where(equity[:max_dd_end + 1] == peak_before_trough)[0]
+        max_dd_start = int(peak_indices[-1]) if len(peak_indices) > 0 else 0
         calmar = ann_ret / (max_dd + 1e-6)
+
+        # 分年最大回撤
+        yearly_dd = {}
+        if oos_dates is not None:
+            years = np.array([str(d)[:4] for d in oos_dates])
+            for yr in sorted(set(years)):
+                mask = years == yr
+                if mask.sum() == 0:
+                    continue
+                yr_eq = equity[mask]
+                yr_peak = np.maximum.accumulate(yr_eq)
+                yr_dd = 1 - yr_eq / yr_peak
+                yearly_dd[yr] = float(np.max(yr_dd))
 
         # 基准统计
         bench_total = bench_equity[-1] - 1
@@ -131,6 +150,9 @@ class StrategyReport:
             "ann_vol": ann_vol,
             "sharpe": sharpe,
             "max_dd": max_dd,
+            "max_dd_start": max_dd_start,
+            "max_dd_end": max_dd_end,
+            "yearly_dd": yearly_dd,
             "calmar": calmar,
             "bench_total": bench_total,
             "bench_ann": bench_ann,
@@ -152,42 +174,88 @@ class StrategyReport:
         print(f"  Ann. Volatility : {metrics['ann_vol']:.2%}")
         print(f"  Sharpe Ratio    : {metrics['sharpe']:.2f}")
         print(f"  Max Drawdown    : {metrics['max_dd']:.2%}")
+        dd_start = oos_dates[metrics['max_dd_start']] if metrics['max_dd_start'] < len(oos_dates) else "N/A"
+        dd_end = oos_dates[metrics['max_dd_end']] if metrics['max_dd_end'] < len(oos_dates) else "N/A"
+        print(f"  Max DD Period   : {dd_start} ~ {dd_end}")
         print(f"  Calmar Ratio    : {metrics['calmar']:.2f}")
         print(f"  Win Rate        : {metrics['win_rate']:.2%}")
         print(f"  Avg Turnover    : {metrics['avg_turnover']:.2%}")
         print("-" * 60)
         print(f"  Benchmark Ann.  : {metrics['bench_ann']:+.2%}")
         print(f"  Excess Total    : {metrics['excess_total']:+.2%}")
+        # 分年回撤
+        yearly_dd = metrics.get("yearly_dd", {})
+        if yearly_dd:
+            print("-" * 60)
+            print("  Yearly Max Drawdown:")
+            for yr, dd_val in yearly_dd.items():
+                print(f"    {yr}  : {dd_val:.2%}")
         print("=" * 60)
 
     def plot_equity(self, daily_ret, bench_daily, oos_dates, suffix=""):
-        """绘制策略 vs 基准净值曲线。"""
+        """绘制策略 vs 基准净值曲线，含回撤子图。"""
         equity = np.cumprod(1 + daily_ret)
         bench_equity = np.cumprod(1 + bench_daily)
 
+        # 回撤序列
+        dd = 1 - equity / np.maximum.accumulate(equity)
+
         dates = [str(d) for d in oos_dates]
-        x = range(len(dates))
+        x = np.arange(len(dates))
 
         plt.style.use("bmh")
-        fig, ax = plt.subplots(figsize=(12, 6))
+        fig, (ax1, ax2) = plt.subplots(
+            2, 1, figsize=(12, 8), height_ratios=[3, 1], sharex=True,
+            gridspec_kw={"hspace": 0.08},
+        )
 
-        ax.plot(x, equity, label="Strategy (Open-to-Open)", linewidth=1.5)
-        ax.plot(x, bench_equity, label="Benchmark (HS300 equal-wt)", alpha=0.5, linewidth=1)
+        # --- 上图：净值曲线 ---
+        ax1.plot(x, equity, label="Strategy (Open-to-Open)", linewidth=1.5)
+        ax1.plot(x, bench_equity, label="Benchmark (HS300 equal-wt)", alpha=0.5, linewidth=1)
 
-        # X 轴日期标签（稀疏化）
-        step = max(1, len(dates) // 10)
-        tick_pos = list(range(0, len(dates), step))
-        ax.set_xticks(tick_pos)
-        ax.set_xticklabels([dates[i] for i in tick_pos], rotation=30, fontsize=8)
+        # 标注最大回撤区间
+        dd_peak_idx = int(np.argmax(dd))
+        running_max = np.maximum.accumulate(equity)
+        peak_val = running_max[dd_peak_idx]
+        peak_indices = np.where(equity[:dd_peak_idx + 1] == peak_val)[0]
+        dd_start_idx = int(peak_indices[-1]) if len(peak_indices) > 0 else 0
+
+        ax1.axvspan(dd_start_idx, dd_peak_idx, color="red", alpha=0.15, label="Max Drawdown")
+        ax1.plot(dd_start_idx, equity[dd_start_idx], "rv", markersize=8)
+        ax1.plot(dd_peak_idx, equity[dd_peak_idx], "rv", markersize=8)
+        max_dd_pct = dd[dd_peak_idx]
+        mid = (dd_start_idx + dd_peak_idx) // 2
+        ax1.annotate(
+            f"Max DD: {max_dd_pct:.1%}\n{dates[dd_start_idx]}~{dates[dd_peak_idx]}",
+            xy=(mid, equity[mid]),
+            xytext=(mid, equity[dd_start_idx] * 0.92),
+            fontsize=8, color="red", ha="center",
+            arrowprops=dict(arrowstyle="->", color="red", lw=0.8),
+        )
 
         ann_ret = (equity[-1] ** (252 / len(equity)) - 1) if len(equity) > 0 else 0
         sharpe_val = 0
         if np.std(daily_ret) > 0:
             sharpe_val = (np.mean(daily_ret) * 252 - 0.02) / (np.std(daily_ret) * np.sqrt(252) + 1e-6)
 
-        ax.set_title(f"OOS Backtest: Ann Ret {ann_ret:.1%} | Sharpe {sharpe_val:.2f}")
-        ax.legend()
-        ax.grid(True)
+        ax1.set_title(f"OOS Backtest: Ann Ret {ann_ret:.1%} | Sharpe {sharpe_val:.2f} | Max DD {max_dd_pct:.1%}")
+        ax1.legend(loc="upper left", fontsize=8)
+        ax1.grid(True)
+        ax1.set_ylabel("Equity")
+
+        # --- 下图：回撤 ---
+        ax2.fill_between(x, 0, -dd * 100, color="steelblue", alpha=0.5)
+        ax2.plot(x, -dd * 100, color="steelblue", linewidth=0.6)
+        ax2.axhline(0, color="gray", linewidth=0.5)
+        ax2.set_ylabel("Drawdown (%)")
+        ax2.set_ylim(min(-dd.max() * 100 * 1.2, -1), 0)
+
+        # X 轴日期标签
+        step = max(1, len(dates) // 10)
+        tick_pos = list(range(0, len(dates), step))
+        ax2.set_xticks(tick_pos)
+        ax2.set_xticklabels([dates[i] for i in tick_pos], rotation=30, fontsize=8)
+
         plt.tight_layout()
 
         # 保存
