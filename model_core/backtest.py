@@ -1,5 +1,6 @@
 import torch
 from .config import ModelConfig
+from .filter import apply_fundamental_filter
 
 
 class AshareBacktest:
@@ -53,15 +54,8 @@ class AshareBacktest:
         scores[~valid_mask] = float('-inf')
         scores[turnover_rate <= self.min_turnover] = float('-inf')
 
-        # 基本面过滤：PE<=0 排除亏损（即 EPS<=0），PE>MAX 排除高估值，ROE<MIN 排除低效
-        if pe_ttm is not None:
-            bad_pe = (pe_ttm <= 0) | (pe_ttm > ModelConfig.MAX_PE_TTM)
-            bad_pe[torch.isnan(pe_ttm)] = False
-            scores[bad_pe] = float('-inf')
-        if roe is not None:
-            bad_roe = roe < ModelConfig.MIN_ROE
-            bad_roe[torch.isnan(roe) | torch.isinf(roe)] = False
-            scores[bad_roe] = float('-inf')
+        # 基本面过滤
+        apply_fundamental_filter(scores, pe_ttm, roe)
 
         # 市场状态判断：等权组合收益的 20 日均线（排除停牌）
         valid_target = target_ret.clone()

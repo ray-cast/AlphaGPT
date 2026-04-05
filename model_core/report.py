@@ -9,6 +9,7 @@ import torch
 
 from .config import ModelConfig
 from .backtest import AshareBacktest
+from .filter import apply_fundamental_filter
 
 
 class StrategyReport:
@@ -49,12 +50,16 @@ class StrategyReport:
         constituent_all = loader.raw_data_cache.get(
             "constituent", torch.ones_like(alpha_values, dtype=torch.bool)
         )
+        pe_ttm_all = loader.raw_data_cache.get("pe_ttm")
+        roe_all = loader.raw_data_cache.get("roe")
 
         alpha_oos = alpha_values[:, start:end]
         target_oos = target_ret[:, start:end]
         turnover_oos = turnover_rate[:, start:end]
         suspended_oos = suspended_all[:, start:end]
         constituent_oos = constituent_all[:, start:end]
+        pe_ttm_oos = pe_ttm_all[:, start:end] if pe_ttm_all is not None else None
+        roe_oos = roe_all[:, start:end] if roe_all is not None else None
         oos_dates = loader.dates[start:end]
 
         N, T = alpha_oos.shape
@@ -74,6 +79,8 @@ class StrategyReport:
         scores_filter = alpha_oos.clone()
         scores_filter[~valid_mask] = float('-inf')
         scores_filter[turnover_oos <= self.min_turnover] = float('-inf')
+        # 基本面过滤
+        apply_fundamental_filter(scores_filter, pe_ttm_oos, roe_oos)
         rank_gap = ModelConfig.REBALANCE_RANK_GAP
         position = AshareBacktest._build_position(
             scores_filter, valid_mask, min(self.top_n, N), rank_gap
