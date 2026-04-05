@@ -58,14 +58,14 @@ def run_train():
 
 def _run_report(eng):
     """运行 OOS 业绩评估并输出报告。"""
-    from model_core.vm import StackVM
+    from model_core.vm import PrefixVM
     from model_core.report import StrategyReport
 
     if eng.best_formula is None:
         print("未训练出有效公式，跳过业绩评估")
         return
 
-    vm = StackVM()
+    vm = PrefixVM()
     alpha_values = vm.execute(eng.best_formula, eng.loader.feat_tensor)
     if alpha_values is None:
         print("公式执行失败，跳过业绩评估")
@@ -78,29 +78,49 @@ def _run_report(eng):
 
 
 def run_signal_only():
-    """用已有的 best_ashare_strategy.json 直接生成信号。"""
+    """用已有训练结果直接生成信号。优先从 training_history.json 读取。"""
     from model_core.config import ModelConfig
     from model_core.data_loader import AshareDataLoader
-    from model_core.vm import StackVM
+    from model_core.vm import PrefixVM
     from model_core.signal_writer import SignalWriter
     from model_core.report import StrategyReport
 
-    formula_path = "best_ashare_strategy.json"
-    if not os.path.exists(formula_path):
-        print(f"错误: 未找到 {formula_path}，请先运行训练: python run_daily.py")
+    formula = None
+    decoded = "N/A"
+    score = "N/A"
+
+    # 优先从 training_history.json 读取
+    history_path = "training_history.json"
+    if os.path.exists(history_path):
+        with open(history_path, "r") as f:
+            history = json.load(f)
+        formula = history.get("best_formula")
+        decoded = history.get("best_decoded", "N/A")
+        best_scores = history.get("best_score", [])
+        score = best_scores[-1] if best_scores else "N/A"
+        print(f"从 {history_path} 加载公式: {decoded}")
+        print(f"  历史得分: {score}")
+
+    # 回退到 best_ashare_strategy.json
+    if formula is None:
+        formula_path = "best_ashare_strategy.json"
+        if os.path.exists(formula_path):
+            with open(formula_path, "r") as f:
+                info = json.load(f)
+            formula = info["formula"]
+            decoded = info.get("decoded", "N/A")
+            score = info.get("score", "N/A")
+            print(f"从 {formula_path} 加载公式: {decoded}")
+            print(f"  历史得分: {score}")
+
+    if formula is None:
+        print("错误: 未找到训练结果，请先运行训练: python run_daily.py")
         sys.exit(1)
-
-    with open(formula_path, "r") as f:
-        info = json.load(f)
-
-    formula = info["formula"]
-    print(f"加载已有公式: {info.get('decoded', 'N/A')}")
-    print(f"  历史得分: {info.get('score', 'N/A')}")
 
     loader = AshareDataLoader()
     loader.load_data()
 
-    vm = StackVM()
+    vm = PrefixVM()
     alpha_values = vm.execute(formula, loader.feat_tensor)
 
     if alpha_values is None:

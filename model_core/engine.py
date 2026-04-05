@@ -10,7 +10,7 @@ from .data_loader import AshareDataLoader
 from .alphagpt import AlphaGPT, NewtonSchulzLowRankDecay, StableRankMonitor
 from .vm import PrefixVM
 from .backtest import AshareBacktest
-from .ops import OPS_CONFIG, TS_OP_INDICES, CS_OP_INDICES
+from .ops import OPS_CONFIG
 
 
 class AlphaEngine:
@@ -243,18 +243,7 @@ class AlphaEngine:
                     if count > 1:
                         diversity_bonus[i] = -ModelConfig.DIVERSITY_PENALTY * (count / bs)
 
-            # 混合结构奖励：同时包含时序+截面算子的公式获得额外 bonus
-            mixed_bonus = torch.zeros(bs, device=ModelConfig.DEVICE)
-            for i in range(bs):
-                vlen = self._valid_prefix_len(formulas[i], feat_count, arity_map)
-                tokens = formulas[i][:vlen]
-                op_indices = set(t - feat_count for t in tokens if t >= feat_count)
-                has_ts = bool(op_indices & TS_OP_INDICES)
-                has_cs = bool(op_indices & CS_OP_INDICES)
-                if has_ts and has_cs:
-                    mixed_bonus[i] = ModelConfig.MIXED_STRUCTURE_BONUS
-
-            adv = adv + length_bonus + diversity_bonus + mixed_bonus
+            adv = adv + length_bonus + diversity_bonus
             adv = adv - adv.mean()  # 去均值，确保 baselined
 
             # Per-timestep advantage masking：只对 active steps 应用 advantage
@@ -280,7 +269,6 @@ class AlphaEngine:
 
             self.opt.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.opt.step()
 
             if self.use_lord:
@@ -327,6 +315,18 @@ class AlphaEngine:
         print(f"\n训练完成!")
         print(f"  最佳得分: {self.best_score:.4f}")
         print(f"  最佳公式: {self._decode(self.best_formula)}")
+
+        # 保存 best_ashare_strategy.json 供 --signal-only 使用
+        if self.best_formula is not None:
+            import json as _json
+            strategy_info = {
+                "formula": self.best_formula,
+                "decoded": self._decode(self.best_formula),
+                "score": self.best_score,
+            }
+            with open("best_ashare_strategy.json", "w") as f:
+                _json.dump(strategy_info, f, ensure_ascii=False, indent=2)
+            print(f"  策略已保存至 best_ashare_strategy.json")
 
     def _decode(self, tokens):
         """将 token 序列解码为可读公式字符串。"""

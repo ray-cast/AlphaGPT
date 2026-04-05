@@ -89,26 +89,4 @@ OPS_CONFIG = [
     ('DECAY', _op_decay, 1),
     ('DELAY1', lambda x: _ts_delay(x, 1), 1),
     ('MAX3', lambda x: torch.max(x, torch.max(_ts_delay(x,1), _ts_delay(x,2))), 1),
-
-    # 时序算子 — 来自 times.py，补齐多日窗口时序统计能力
-    ('DELTA5',    lambda x: _ts_delta(x, 5),           1),  # 5日变化量
-    ('MA20',      lambda x: _ts_decay_linear(x, 20),   1),  # 20日线性衰减均线
-    ('STD20',     lambda x: _ts_zscore(x, 20),         1),  # 20日时序标准化
-    ('TS_RANK20', lambda x: _ts_rank(x, 20),           1),  # 20日时序排名百分位
-
-    # 截面算子 — 量化选股核心操作
-    ('RANK',   _cs_rank,   1),    # 截面排名归一化
-    ('ZSCORE', _cs_zscore, 1),    # 截面标准化
-
-    # 时序-截面混合算子 — 单 token 实现"先时序后截面"，大幅降低搜索难度
-    ('RANK_DELTA5',  lambda x: _cs_rank(x - _ts_delay(x, 5)),        1),  # 截面排名(5日动量)
-    ('RANK_TS_RANK', lambda x: _cs_rank(_ts_rank(x, 20)),            1),  # 截面排名(20日时序百分位)
-    ('ZSCORE_STD20', lambda x: _cs_zscore(_ts_zscore(x, 20)),        1),  # 截面标准化(20日时序标准化)
-    ('RANK_MA20',    lambda x: _cs_rank(_ts_decay_linear(x, 20)),    1),  # 截面排名(20日衰减均线)
 ]
-
-# 算子分类索引（相对于 OPS_CONFIG 的偏移量），用于 engine.py 的混合结构奖励
-_TS_OPS = {'DELTA5', 'MA20', 'STD20', 'TS_RANK20', 'DELAY1', 'DECAY', 'MAX3'}
-_CS_OPS = {'RANK', 'ZSCORE'}
-TS_OP_INDICES = {i for i, cfg in enumerate(OPS_CONFIG) if cfg[0] in _TS_OPS}
-CS_OP_INDICES = {i for i, cfg in enumerate(OPS_CONFIG) if cfg[0] in _CS_OPS}
