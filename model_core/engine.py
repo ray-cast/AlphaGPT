@@ -383,54 +383,45 @@ class AlphaEngine:
 
         for step in range(self.sft_steps):
             sft_opt.zero_grad()
-            total_loss = 0.0
-            for formula in all_seeds:
-                # 自回归教师强制：逐步输入 prefix，预测下一个 token
-                inp = torch.zeros((1, 1), dtype=torch.long, device=ModelConfig.DEVICE)
-                loss = 0.0
-                for t, target_token in enumerate(formula):
-                    logits, _, _ = self.model(inp)
-                    target = torch.tensor([target_token], device=ModelConfig.DEVICE)
-                    loss += F.cross_entropy(logits, target)
-                    inp = torch.cat([inp, target.unsqueeze(0)], dim=1)
 
-                loss = loss / len(formula)
-                total_loss += loss.item()
-                loss.backward()  # 梯度累积，不做 step
+            # Round-robin：每步只训练一个公式，避免多公式共享初始状态导致的梯度冲突
+            formula = all_seeds[step % len(all_seeds)]
+            inp = torch.zeros((1, 1), dtype=torch.long, device=ModelConfig.DEVICE)
+            loss = 0.0
+            for t, target_token in enumerate(formula):
+                logits, _, _ = self.model(inp)
+                target = torch.tensor([target_token], device=ModelConfig.DEVICE)
+                loss += F.cross_entropy(logits, target)
+                inp = torch.cat([inp, target.unsqueeze(0)], dim=1)
 
-            total_loss = total_loss / len(all_seeds)
-            sft_opt.step()  # 所有公式梯度平均后统一更新
+            loss = loss / len(formula)
+            loss.backward()
+            sft_opt.step()
 
             if (step + 1) % 10 == 0:
-                print(f"    [SFT] Step {step+1}/{self.sft_steps}, avg loss: {total_loss:.4f}")
+                print(f"    [SFT] Step {step+1}/{self.sft_steps}, "
+                      f"formula {self._decode(formula)}, loss: {loss.item():.4f}")
 
-        # 验证：检查模型是否能通过 greedy decoding 复现每个种子公式
+        # 验证：teacher-forced next-token 准确率
+        # 注意：多个公式共享初始 token [0]，greedy decoding 只能复现一条序列，
+        # 因此用 teacher-forced 逐 token 检查更合理。
         self.model.eval()
         with torch.no_grad():
             for formula in all_seeds:
                 inp = torch.zeros((1, 1), dtype=torch.long, device=ModelConfig.DEVICE)
-                generated = []
-                for _ in range(max_len):
+                correct = 0
+                for t, target_token in enumerate(formula):
                     logits, _, _ = self.model(inp)
-                    next_token = logits.argmax(dim=-1).item()
-                    generated.append(next_token)
-                    inp = torch.cat([inp, torch.tensor([[next_token]], device=ModelConfig.DEVICE)], dim=1)
-                    # 检查是否生成了一个完整的表达式
-                    open_slots = 1
-                    for tok in generated:
-                        if tok < feat_count:
-                            open_slots -= 1
-                        else:
-                            op_idx = tok - feat_count
-                            if op_idx < len(OPS_CONFIG):
-                                open_slots += OPS_CONFIG[op_idx][2] - 1
-                    if open_slots <= 0:
-                        break  # 跳出外层 for 循环
-
-                match = generated == list(formula)
-                status = "OK" if match else "MISMATCH"
-                print(f"    [SFT-Verify] {status}: expected {self._decode(formula)}, "
-                      f"got {self._decode(generated)}")
+                    pred = logits.argmax(dim=-1).item()
+                    if pred == target_token:
+                        correct += 1
+                    # Teacher forcing：使用正确 token 作为下一步输入
+                    inp = torch.cat([inp, torch.tensor([[target_token]],
+                                 device=ModelConfig.DEVICE)], dim=1)
+                acc = correct / len(formula) * 100
+                status = "OK" if correct == len(formula) else "PARTIAL"
+                print(f"    [SFT-Verify] {status}: {self._decode(formula)} "
+                      f"({correct}/{len(formula)} tokens, {acc:.0f}%)")
 
         self.model.train()
 
