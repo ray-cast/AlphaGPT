@@ -7,18 +7,6 @@ def _ts_delta(x: torch.Tensor, d: int) -> torch.Tensor:
     return x - _ts_delay(x, d)
 
 
-def _ts_zscore(x: torch.Tensor, d: int) -> torch.Tensor:
-    """时序标准化：(x - MA_d) / STD_d。"""
-    if d <= 1: return torch.zeros_like(x)
-    B, T = x.shape
-    pad = torch.zeros((B, d - 1), device=x.device)
-    x_pad = torch.cat([pad, x], dim=1)
-    windows = x_pad.unfold(1, d, 1)
-    mean = windows.mean(dim=-1)
-    std = windows.std(dim=-1) + 1e-6
-    return (x - mean) / std
-
-
 def _ts_decay_linear(x: torch.Tensor, d: int) -> torch.Tensor:
     """线性衰减均线：近期权重更大。"""
     if d <= 1: return x
@@ -43,16 +31,56 @@ def _ts_rank(x: torch.Tensor, d: int) -> torch.Tensor:
     return rank / (d - 1)
 
 
+def _ts_min(x: torch.Tensor, d: int) -> torch.Tensor:
+    """时序滚动最小值。"""
+    if d <= 1: return x
+    B, T = x.shape
+    pad = torch.full((B, d - 1), float('inf'), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    windows = x_pad.unfold(1, d, 1)
+    return windows.min(dim=-1)[0]
+
+
+def _ts_max(x: torch.Tensor, d: int) -> torch.Tensor:
+    """时序滚动最大值。"""
+    if d <= 1: return x
+    B, T = x.shape
+    pad = torch.full((B, d - 1), float('-inf'), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    windows = x_pad.unfold(1, d, 1)
+    return windows.max(dim=-1)[0]
+
+
+def _ts_std(x: torch.Tensor, d: int) -> torch.Tensor:
+    """时序滚动标准差。"""
+    if d <= 1: return torch.zeros_like(x)
+    B, T = x.shape
+    pad = torch.zeros((B, d - 1), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    windows = x_pad.unfold(1, d, 1)
+    return windows.std(dim=-1)
+
+
+def _ts_corr(x: torch.Tensor, y: torch.Tensor, d: int) -> torch.Tensor:
+    """两因子滚动 Pearson 相关系数。"""
+    if d <= 1: return torch.zeros_like(x)
+    B, T = x.shape
+    pad = torch.zeros((B, d - 1), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    y_pad = torch.cat([pad, y], dim=1)
+    xw = x_pad.unfold(1, d, 1)
+    yw = y_pad.unfold(1, d, 1)
+    xm = xw - xw.mean(dim=-1, keepdim=True)
+    ym = yw - yw.mean(dim=-1, keepdim=True)
+    cov = (xm * ym).mean(dim=-1)
+    std = xw.std(dim=-1) * yw.std(dim=-1) + 1e-8
+    return cov / std
+
+
 def _cs_rank(x: torch.Tensor) -> torch.Tensor:
     """截面排名：将每只股票在当日所有股票中的排名归一化到 [0, 1]。"""
     return x.argsort(dim=0).argsort(0).float() / (x.shape[0] + 1e-6)
 
-
-def _cs_zscore(x: torch.Tensor) -> torch.Tensor:
-    """截面标准化：对每个交易日做 z-score。"""
-    mean = x.mean(dim=0, keepdim=True)
-    std = x.std(dim=0, keepdim=True) + 1e-6
-    return (x - mean) / std
 
 @torch.jit.script
 def _ts_delay(x: torch.Tensor, d: int) -> torch.Tensor:
@@ -93,7 +121,10 @@ def _op_jump(x: torch.Tensor) -> torch.Tensor:
 
 @torch.jit.script
 def _op_decay(x: torch.Tensor) -> torch.Tensor:
-    return x + 0.8 * _ts_delay(x, 1) + 0.6 * _ts_delay(x, 2)
+    # 权重归一化，避免深层嵌套时信号爆炸
+    w0, w1, w2 = 1.0, 0.8, 0.6
+    s = w0 + w1 + w2
+    return (w0 * x + w1 * _ts_delay(x, 1) + w2 * _ts_delay(x, 2)) / s
 
 OPS_CONFIG = [
     ('ADD', lambda x, y: x + y, 2),
@@ -106,14 +137,17 @@ OPS_CONFIG = [
     ('GATE', _op_gate, 3),
     ('JUMP', _op_jump, 1),
     ('DECAY', _op_decay, 1),
-    ('DELAY1', lambda x: _ts_delay(x, 1), 1),
-    ('MAX3', lambda x: torch.max(x, torch.max(_ts_delay(x,1), _ts_delay(x,2))), 1),
     # 截面算子：对每个交易日做截面操作（dim=0 = 股票维度）
     ('CS_RANK', _cs_rank, 1),
-    ('CS_ZSCORE', _cs_zscore, 1),
+    # 截面交互：排名乘积，捕捉多因子协同
+    ('CROSS', lambda x, y: _cs_rank(x) * _cs_rank(y), 2),
     # 时序算子：固定窗口版本（VM 无法传参数，故预定义常用窗口）
     ('TS_RANK20', lambda x: _ts_rank(x, 20), 1),
-    ('TS_ZSCORE20', lambda x: _ts_zscore(x, 20), 1),
     ('TS_MA20', lambda x: _ts_decay_linear(x, 20), 1),
     ('TS_DELTA5', lambda x: _ts_delta(x, 5), 1),
+    ('TS_MIN5', lambda x: _ts_min(x, 5), 1),
+    ('TS_MAX5', lambda x: _ts_max(x, 5), 1),
+    ('TS_STD20', lambda x: _ts_std(x, 20), 1),
+    ('TS_DELAY2', lambda x: _ts_delay(x, 2), 1),
+    ('TS_CORR20', lambda x, y: _ts_corr(x, y, 20), 2),
 ]
