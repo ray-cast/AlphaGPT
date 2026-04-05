@@ -48,6 +48,7 @@ class AlphaEngine:
         self.patience_counter = 0
         self.patience_limit = ModelConfig.PATIENCE_LIMIT
         self.bt = AshareBacktest()
+        self.valid_idx = self.loader.valid_idx
         self.train_idx = self.loader.train_idx
         self.test_idx = self.loader.test_idx
 
@@ -187,7 +188,7 @@ class AlphaEngine:
 
                 score, ret_val = self.bt.evaluate(
                     res, self.loader.raw_data_cache, self.loader.target_ret,
-                    end_idx=self.train_idx
+                    start_idx=self.valid_idx, end_idx=self.train_idx
                 )
 
                 # 新颖性奖励：首次出现的公式获得额外 bonus

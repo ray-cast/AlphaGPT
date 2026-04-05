@@ -12,10 +12,11 @@ class ModelConfig:
     DATA_DIR = os.path.join(_PROJECT_ROOT, "data")
 
     # ---------- 数据集日期划分 ----------
-    DATA_START_DATE = "20190101"         # 数据起始日期
-    TRAIN_END_DATE = "20241231"          # 训练集截止（含）
-    TEST_END_DATE = "20250630"           # 测试集截止（含）
-    # 验证集：TEST_END_DATE 之后的所有数据
+    DATA_START_DATE = "20170101"         # 数据起始日期
+    VALID_END_DATE = "20181231"          # 验证集截止（含）
+    TRAIN_END_DATE = "20231231"          # 训练集截止（含）
+    TEST_END_DATE = "20261231"           # 测试集截止（含）
+    # 验证集：2017-2018 | 训练集：2019-2023 | 测试集：2024-2026
 
     # ---------- 训练参数 ----------
     BATCH_SIZE = 1024

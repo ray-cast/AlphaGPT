@@ -45,8 +45,8 @@ class SignalWriter:
         """
         os.makedirs(output_dir, exist_ok=True)
 
-        # 只输出验证集日期
-        val_start = self.test_idx
+        # 输出测试集及以后的信号
+        val_start = self.train_idx
         val_dates = self.dates[val_start:]
         alpha_val = alpha_values[:, val_start:]
         trend_val = self.market_trend[val_start:]

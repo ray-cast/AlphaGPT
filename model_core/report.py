@@ -35,9 +35,9 @@ class StrategyReport:
         if split_type == "test":
             start = loader.train_idx
             end = loader.test_idx
-        else:
-            start = loader.test_idx
-            end = None
+        else:  # "val" = 验证集 (17-18)
+            start = 0
+            end = loader.valid_idx
         target_ret = loader.target_ret  # [num_stocks, T]
         turnover_rate = loader.raw_data_cache.get(
             "turnover_rate", torch.zeros_like(alpha_values)

@@ -83,7 +83,10 @@ def _op_jump(x: torch.Tensor) -> torch.Tensor:
     var = cumsum2 / arange - mean * mean
     std = torch.sqrt(var.clamp(min=1e-6))
     z = (x_safe - mean) / std
-    result = torch.relu(z - 3.0)
+    # 直接输出 z-score，保留连续排序信息
+    # 旧版 relu(z - 3.0) 阈值过高，绝大多数输出为 0，
+    # 配合 SIGN 后导致信号全部相同，无区分度
+    result = z
     # NaN 位置还原为 NaN
     result = torch.where(nan_mask, torch.full_like(result, float('nan')), result)
     return result
@@ -105,4 +108,10 @@ OPS_CONFIG = [
     ('DECAY', _op_decay, 1),
     ('DELAY1', lambda x: _ts_delay(x, 1), 1),
     ('MAX3', lambda x: torch.max(x, torch.max(_ts_delay(x,1), _ts_delay(x,2))), 1),
+    # 截面算子：对每个交易日做截面操作（dim=0 = 股票维度）
+    ('CS_RANK', _cs_rank, 1),
+    ('CS_ZSCORE', _cs_zscore, 1),
+    # 时序算子：固定窗口版本（VM 无法传参数，故预定义常用窗口）
+    ('TS_RANK20', lambda x: _ts_rank(x, 20), 1),
+    ('TS_ZSCORE20', lambda x: _ts_zscore(x, 20), 1),
 ]

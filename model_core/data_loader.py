@@ -17,6 +17,7 @@ class AshareDataLoader:
         self.target_ret = None         # [num_stocks, T]
         self.stock_codes = []          # list[str]
         self.dates = None              # pd.DatetimeIndex
+        self.valid_idx = None          # 验证集截止索引（不含）
         self.train_idx = None          # 训练集截止索引（不含）
         self.test_idx = None           # 测试集截止索引（不含）
 
@@ -149,13 +150,17 @@ class AshareDataLoader:
         # 复牌跳空极端收益截断（A股涨跌停 ±10%/±20%，超过 ±25% 视为异常）
         self.target_ret = self.target_ret.clamp(-0.25, 0.25)
 
-        # 7. 训练/测试/验证三集切分
-        self.train_idx = 0  # 默认值
-        self.test_idx = 0   # 默认值
+        # 7. 验证/训练/测试三集切分
+        self.valid_idx = 0
+        self.train_idx = 0
+        self.test_idx = 0
+        valid_end = int(ModelConfig.VALID_END_DATE)
         train_end = int(ModelConfig.TRAIN_END_DATE)
         test_end = int(ModelConfig.TEST_END_DATE)
         for i, d in enumerate(self.dates):
             d_int = int(d)
+            if d_int <= valid_end:
+                self.valid_idx = i + 1
             if d_int <= train_end:
                 self.train_idx = i + 1
             if d_int <= test_end:
@@ -163,22 +168,24 @@ class AshareDataLoader:
 
         # 边界校验
         T = len(self.dates)
-        if self.train_idx < 60:
+        if self.valid_idx < 20:
             raise ValueError(
-                f"训练集不足 60 个交易日（仅 {self.train_idx} 天），"
-                f"请检查 DATA_START_DATE / TRAIN_END_DATE 配置或数据完整性"
+                f"验证集不足 20 个交易日（仅 {self.valid_idx} 天），"
+                f"请检查 DATA_START_DATE / VALID_END_DATE 配置或数据完整性"
+            )
+        if self.train_idx <= self.valid_idx:
+            raise ValueError(
+                f"训练集为空（valid_idx={self.valid_idx}, train_idx={self.train_idx}），"
+                f"请检查 VALID_END_DATE / TRAIN_END_DATE 配置或数据完整性"
             )
         if self.test_idx <= self.train_idx:
             raise ValueError(
                 f"测试集为空（train_idx={self.train_idx}, test_idx={self.test_idx}），"
                 f"请检查 TRAIN_END_DATE / TEST_END_DATE 配置或数据完整性"
             )
-        if T - self.test_idx < 20:
-            print(f"[WARN] 验证集仅 {T - self.test_idx} 个交易日，统计指标可能不可靠")
 
         N, T = self.raw_data_cache["close"].shape
         print(f"数据加载完成: {N} 只股票, {T} 个交易日, {self.feat_tensor.shape[1]} 个因子")
-        if self.train_idx > 0 and self.test_idx > self.train_idx:
-            print(f"  训练集: {self.dates[0]} ~ {self.dates[self.train_idx-1]} ({self.train_idx} 天)")
-            print(f"  测试集: {self.dates[self.train_idx]} ~ {self.dates[self.test_idx-1]} ({self.test_idx - self.train_idx} 天)")
-            print(f"  验证集: {self.dates[self.test_idx]} ~ {self.dates[-1]} ({T - self.test_idx} 天)")
+        print(f"  验证集: {self.dates[0]} ~ {self.dates[self.valid_idx-1]} ({self.valid_idx} 天)")
+        print(f"  训练集: {self.dates[self.valid_idx]} ~ {self.dates[self.train_idx-1]} ({self.train_idx - self.valid_idx} 天)")
+        print(f"  测试集: {self.dates[self.train_idx]} ~ {self.dates[self.test_idx-1]} ({self.test_idx - self.train_idx} 天)")

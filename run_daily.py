@@ -156,7 +156,7 @@ def run_signal_only():
 
 def print_top_picks(loader, alpha_values):
     """打印最新交易日的 Top30 选股。"""
-    if loader.test_idx is None or loader.test_idx >= alpha_values.shape[1]:
+    if loader.train_idx is None or loader.train_idx >= alpha_values.shape[1]:
         print("无样本外数据")
         return
 
