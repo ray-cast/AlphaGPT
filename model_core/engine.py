@@ -162,10 +162,12 @@ class AlphaEngine:
             # 公式去重：相同公式只执行一次，结果映射回原位置
             formulas = seqs.tolist()
             unique_map = {}  # tuple(formula) -> (score, ret_val)
+            formula_keys = [None] * bs  # 缓存 trimmed keys，避免重复计算
             for i in range(bs):
                 vlen = self._valid_prefix_len(formulas[i], feat_count, arity_map)
                 trimmed = formulas[i][:vlen]
                 fkey = tuple(trimmed)
+                formula_keys[i] = fkey
                 if fkey in unique_map:
                     score, _ = unique_map[fkey]
                     rewards[i] = score
@@ -229,25 +231,21 @@ class AlphaEngine:
 
             adv = 0.7 * rank_normalized + 0.3 * raw_normalized
 
-            # 公式长度 bonus：对数缩放，单 token 得 0，5 token 得 0.23
+            # 公式长度 bonus：使用已缓存的 formula_keys
             formula_lengths = torch.ones(bs, device=ModelConfig.DEVICE)
             for i in range(bs):
-                vlen = self._valid_prefix_len(formulas[i], feat_count, arity_map)
-                formula_lengths[i] = max(vlen, 1)
-            length_bonus = torch.log2(formula_lengths) * ModelConfig.LENGTH_BONUS_COEF
+                formula_lengths[i] = len(formula_keys[i]) if formula_keys[i] else 1
+            length_bonus = torch.log2(formula_lengths.clamp(min=1)) * ModelConfig.LENGTH_BONUS_COEF
 
-            # 多样性惩罚：对 batch 内重复出现的公式施加惩罚
+            # 多样性惩罚：使用已缓存的 formula_keys
             diversity_bonus = torch.zeros(bs, device=ModelConfig.DEVICE)
             if unique_ratio < ModelConfig.DIVERSITY_TARGET:
                 formula_counts = {}
                 for i in range(bs):
-                    vlen = self._valid_prefix_len(formulas[i], feat_count, arity_map)
-                    fkey = tuple(formulas[i][:vlen])
+                    fkey = formula_keys[i]
                     formula_counts[fkey] = formula_counts.get(fkey, 0) + 1
                 for i in range(bs):
-                    vlen = self._valid_prefix_len(formulas[i], feat_count, arity_map)
-                    fkey = tuple(formulas[i][:vlen])
-                    count = formula_counts[fkey]
+                    count = formula_counts[formula_keys[i]]
                     if count > 1:
                         diversity_bonus[i] = -ModelConfig.DIVERSITY_PENALTY * (count / bs)
 

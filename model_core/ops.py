@@ -68,15 +68,25 @@ def _op_gate(condition: torch.Tensor, x: torch.Tensor, y: torch.Tensor) -> torch
 @torch.jit.script
 def _op_jump(x: torch.Tensor) -> torch.Tensor:
     # expanding window z-score，避免未来数据泄漏
+    # 使用 nan-safe 累积和，防止 NaN 永久传播
     N, T = x.shape
-    cumsum = torch.cumsum(x, dim=1)
-    cumsum2 = torch.cumsum(x * x, dim=1)
-    arange = torch.arange(1, T + 1, device=x.device, dtype=x.dtype).unsqueeze(0)
+    x_safe = torch.where(torch.isnan(x), torch.zeros_like(x), x)
+    nan_mask = torch.isnan(x)
+
+    cumsum = torch.cumsum(x_safe, dim=1)
+    cumsum2 = torch.cumsum(x_safe * x_safe, dim=1)
+    # 每个位置的合法（非NaN）计数
+    valid_count = torch.cumsum((~nan_mask).float(), dim=1).clamp(min=1.0)
+    arange = valid_count
+
     mean = cumsum / arange
     var = cumsum2 / arange - mean * mean
     std = torch.sqrt(var.clamp(min=1e-6))
-    z = (x - mean) / std
-    return torch.relu(z - 3.0)
+    z = (x_safe - mean) / std
+    result = torch.relu(z - 3.0)
+    # NaN 位置还原为 NaN
+    result = torch.where(nan_mask, torch.full_like(result, float('nan')), result)
+    return result
 
 @torch.jit.script
 def _op_decay(x: torch.Tensor) -> torch.Tensor:

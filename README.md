@@ -1,7 +1,7 @@
 # AlphaGPT
 ## 项目简介
 
-AlphaGPT 是一套 **AI 驱动的量化选股系统**，核心思路是用 Transformer 模型自动生成可解释的 Alpha 因子公式，通过截面回测打分筛选，输出每日沪深300成分股 Top 30 选股信号。
+AlphaGPT 是一套 **AI 驱动的量化选股系统**，核心思路是用 Transformer 模型自动生成可解释的 Alpha 因子公式，通过截面回测打分筛选，输出每日沪深300成分股 Top N 选股信号。
 
 ## 主流程（从数据到信号）
 
@@ -130,13 +130,3 @@ AlphaGPT/
 ├── paper/                 # 学术论文
 └── assets/                # README 图片资源
 ```
-
-## 注意事项
-
-- 项目没有 Dockerfile / docker-compose，需手动搭建环境
-- Tushare Pro 需要积分权限才能获取完整的沪深300日线数据
-- `times.py` 是独立的单 ETF 研究脚本，与主流程无关
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=imbue-bit/AlphaGPT&type=date&legend=top-left)](https://www.star-history.com/#imbue-bit/AlphaGPT&type=legend_top-left)

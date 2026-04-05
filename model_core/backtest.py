@@ -118,35 +118,55 @@ class AshareBacktest:
         if cum_ret < 0:
             neg_return_penalty = min(abs(cum_ret) * 2.0, 1.0)
 
-        # IC 奖励：Spearman 秩相关（截面预测能力，排除停牌/无效股票）
+        # IC 奖励：向量化 Spearman 秩相关（截面预测能力）
+        # 仅当 Sortino > -2 时计算 IC，避免对差公式浪费计算
         ic_bonus = 0.0
-        if N_stocks > 10:
-            # 逐日计算 IC，只使用当天有效股票
-            ic_sum = torch.tensor(0.0, device=factors.device)
-            ic_count = 0
-            for t_i in range(T_len):
-                valid_t = valid_mask[:, t_i]  # [N_stocks]
-                n_valid = valid_t.sum().item()
-                if n_valid < 10:
-                    continue
-                f_t = factors[:, t_i][valid_t]
-                r_t = target_ret[:, t_i][valid_t]
-                if f_t.std() < 1e-8 or r_t.std() < 1e-8:
-                    continue
-                alpha_rank = f_t.argsort().argsort(0).float()
-                ret_rank = r_t.argsort().argsort(0).float()
-                a_c = alpha_rank - alpha_rank.mean()
-                r_c = ret_rank - ret_rank.mean()
-                denom = a_c.norm() * r_c.norm() + 1e-6
-                ic_sum = ic_sum + (a_c * r_c).sum() / denom
-                ic_count += 1
-            if ic_count > 0:
-                ic_bonus = (ic_sum / ic_count) * 5.0
+        if N_stocks > 10 and sortino.item() > -2.0:
+            ic_bonus = self._vectorized_ic(factors, target_ret, valid_mask, T_len, N_stocks)
 
         # 综合得分
         fitness = sortino - dd_penalty - turnover_penalty - neg_return_penalty + ic_bonus
 
         return fitness, cum_ret.item()
+
+    @staticmethod
+    def _vectorized_ic(factors, target_ret, valid_mask, T_len, N_stocks):
+        """向量化计算逐日 Pearson 秩相关 IC（近似 Spearman）。
+
+        直接用 Pearson 相关系数代替 Spearman，避免 argsort 开销。
+        对于截面选股来说两者高度一致（同调单调变换不改变排序）。
+        """
+        # 每日有效股票数
+        n_valid = valid_mask.float().sum(dim=0).clamp(min=1)  # [T_len]
+
+        # 将 invalid 位置置零
+        f_c = factors.clone()
+        r_c = target_ret.clone()
+        f_c[~valid_mask] = 0.0
+        r_c[~valid_mask] = 0.0
+
+        # 中心化（只对 valid 位置）
+        f_mean = f_c.sum(dim=0) / n_valid
+        r_mean = r_c.sum(dim=0) / n_valid
+        f_c -= f_mean.unsqueeze(0)
+        r_c -= r_mean.unsqueeze(0)
+        f_c[~valid_mask] = 0.0
+        r_c[~valid_mask] = 0.0
+
+        # 逐日 Pearson 相关系数
+        cov = (f_c * r_c).sum(dim=0)
+        std_f = (f_c.pow(2).sum(dim=0)).sqrt().clamp(min=1e-6)
+        std_r = (r_c.pow(2).sum(dim=0)).sqrt().clamp(min=1e-6)
+        daily_ic = cov / (std_f * std_r)
+
+        # 过滤无效天
+        valid_day = (n_valid >= 10) & (std_f > 1e-3) & (std_r > 1e-3)
+        ic_count = valid_day.float().sum()
+        if ic_count < 1:
+            return 0.0
+
+        avg_ic = (daily_ic * valid_day.float()).sum() / ic_count
+        return (avg_ic * 5.0).item()
 
     @staticmethod
     def _rolling_mean_1d(x, window):

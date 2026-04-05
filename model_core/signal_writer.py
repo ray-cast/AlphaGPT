@@ -63,15 +63,28 @@ class SignalWriter:
             col = alpha_val[:, t_idx].cpu().numpy()
             trend_score = float(trend_val[t_idx].cpu())
 
-            # 截面中位数作为多空分界线
-            median_score = np.median(col)
+            # 排除 NaN 后再排名（降序，分值越高排名越前）
+            valid_mask = ~np.isnan(col)
+            ranked_indices_all = np.full(len(col), -1, dtype=int)
+            if valid_mask.any():
+                valid_idx = np.where(valid_mask)[0]
+                sorted_order = col[valid_idx].argsort()[::-1]
+                ranked_indices_all[:len(valid_idx)] = valid_idx[sorted_order]
+            # NaN 股票排到最后
+            nan_idx = np.where(~valid_mask)[0]
+            ranked_indices_all[len(valid_mask) - len(nan_idx):] = nan_idx
 
-            # 排名（降序，分值越高排名越前）
-            ranked_indices = col.argsort()[::-1]
-            for rank, stock_idx in enumerate(ranked_indices, 1):
+            # 截面中位数（排除 NaN）
+            valid_scores = col[valid_mask]
+            median_score = np.median(valid_scores) if len(valid_scores) > 0 else 0.0
+
+            for rank, stock_idx in enumerate(ranked_indices_all, 1):
                 score = float(col[stock_idx])
-                # 基于截面中位数区分方向：高于中位数为做多(1)，否则为看空(-1)
-                direction = 1 if score > median_score else -1
+                if np.isnan(score):
+                    direction = -1
+                else:
+                    # 基于截面中位数区分方向：高于中位数为做多(1)，否则为看空(-1)
+                    direction = 1 if score > median_score else -1
                 # 市场趋势向下时，即使截面看多也降低权重
                 if trend_score < -0.3 and direction == 1:
                     direction = 0  # 观望
