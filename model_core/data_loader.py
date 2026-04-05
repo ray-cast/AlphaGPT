@@ -59,23 +59,13 @@ class AshareDataLoader:
         master = master.sort_values(["ts_code", "trade_date"]).reset_index(drop=True)
         self.stock_codes = loaded_codes
 
-        # 3. 找到交易日：使用至少 70% 股票都有的日期（需要覆盖2017年早期数据）
-        # 先去掉停牌导致的价格 NaN 行，避免停牌股票被误计入日期统计
+        # 3. 不筛选公共日期：每只股票保留各自完整时间序列
+        # 新股/停牌通过 NaN mask 在下游处理，截面算子仅作用于每日有数据的股票
         master = master.dropna(subset=["close"])
-        all_unique_dates = sorted(master["trade_date"].unique())
-        date_count = {}
-        for code in loaded_codes:
-            sub = master[master["ts_code"] == code]
-            for d in sub["trade_date"].tolist():
-                date_count[d] = date_count.get(d, 0) + 1
-        threshold = len(loaded_codes) * 0.7
-        common_dates = [d for d in all_unique_dates if date_count.get(d, 0) >= threshold]
-
-        # 过滤 master 只保留公共日期
-        master = master[master["trade_date"].isin(common_dates)]
 
         # 4. Pivot 为 [stocks, T] 的 tensor
-        # 先用 close 构建停牌掩码（ffill 之前），再统一做前向填充
+        # 未上市的日期自然为 NaN，ffill 不填充无前值的 NaN（新股不影响）
+        # 停牌缺口由 ffill 用最近价格填充（合规）
         close_pivot = master.pivot(index="trade_date", columns="ts_code", values="close")
         close_pivot = close_pivot.sort_index()
         close_pivot = close_pivot[[c for c in loaded_codes if c in close_pivot.columns]]
@@ -119,7 +109,7 @@ class AshareDataLoader:
             vol_ratio = vol / (vol_ma20 + 1e-9)
             self.raw_data_cache["turnover_rate"] = vol_ratio
 
-        self.dates = sorted(common_dates)
+        self.dates = sorted(master["trade_date"].unique())
 
         # 4.5 按配置的日期范围裁剪
         start_dt = ModelConfig.DATA_START_DATE
