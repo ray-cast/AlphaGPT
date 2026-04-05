@@ -73,19 +73,20 @@ class StrategyReport:
         position.scatter_(0, topk_idx, 1.0)
         position[~valid_mask] = 0.0
 
-        # 熊市减仓：与 backtest 一致，权重减半（不减少持股数）
+        # 熊市减仓系数：市场弱势时收益按半仓计算（不影响实际换手）
         bear_mask = market_ma20 < 0
-        position[:, bear_mask] *= 0.5
+        bear_scale = torch.ones(T, device=alpha_oos.device)
+        bear_scale[bear_mask] = 0.5
 
-        # 换手
+        # 换手（基于实际选股变化，不含熊市虚拟减仓）
         prev_pos = torch.roll(position, 1, dims=1)
         prev_pos[:, 0] = 0.0
         turnover = torch.abs(position - prev_pos)
         avg_cost = (self.buy_cost + self.sell_cost) / 2.0
         tx_cost = turnover * avg_cost
 
-        # 组合收益（绝对收益，按实际持仓权重归一化）
-        gross_pnl = position * target_oos
+        # 组合收益（熊市减仓应用到收益端，不产生虚假换手成本）
+        gross_pnl = position * target_oos * bear_scale.unsqueeze(0)
         net_pnl = gross_pnl - tx_cost
 
         daily_ret = net_pnl.sum(dim=0).cpu().numpy() / (position.sum(dim=0).clamp(min=1).cpu().numpy())
@@ -113,9 +114,10 @@ class StrategyReport:
         bench_total = bench_equity[-1] - 1
         bench_ann = bench_equity[-1] ** (252 / T) - 1 if T > 0 else 0.0
 
-        # 超额统计
-        excess_daily = daily_ret - bench_daily
-        excess_equity = np.cumprod(1 + excess_daily)
+        # 超额统计（用策略净值/基准净值，而非差值累乘）
+        strategy_equity = np.cumprod(1 + daily_ret)
+        benchmark_equity = np.cumprod(1 + bench_daily)
+        excess_equity = strategy_equity / np.maximum(benchmark_equity, 1e-12)
         excess_total = excess_equity[-1] - 1
 
         avg_turnover = turnover.mean().item()
@@ -201,11 +203,17 @@ class StrategyReport:
 
     @staticmethod
     def _rolling_mean_1d(x, window):
-        """对 1D tensor 计算滚动均值。"""
+        """对 1D tensor 计算滚动均值，前期不足 window 时用 expanding mean。"""
         T = x.shape[0]
         if T < window:
-            return torch.zeros_like(x)
-        pad = torch.zeros(window - 1, device=x.device)
-        x_pad = torch.cat([pad, x])
-        windows = x_pad.unfold(0, window, 1)
-        return windows.mean(dim=-1)
+            cumsum = torch.cumsum(x, dim=0)
+            arange = torch.arange(1, T + 1, device=x.device, dtype=x.dtype)
+            return cumsum / arange
+        cumsum = torch.cumsum(x, dim=0)
+        arange = torch.arange(1, T + 1, device=x.device, dtype=x.dtype)
+        expanding_mean = cumsum / arange
+        rolling_sum = cumsum[window - 1:] - torch.cat(
+            [torch.zeros(1, device=x.device), cumsum[:T - window]]
+        )
+        rolling_mean = rolling_sum / window
+        return torch.cat([expanding_mean[:window - 1], rolling_mean])

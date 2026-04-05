@@ -60,11 +60,12 @@ class AshareBacktest:
         # 持仓中排除无效股票
         position[~valid_mask] = 0.0
 
-        # 熊市减仓：市场弱势时持仓权重减半
+        # 熊市减仓系数：市场弱势时收益按半仓计算（不影响实际换手）
         bear_mask = market_ma20 < 0
-        position[:, bear_mask] *= 0.5
+        bear_scale = torch.ones(T_len, device=factors.device)
+        bear_scale[bear_mask] = 0.5
 
-        # 换手
+        # 换手（基于实际选股变化，不含熊市虚拟减仓）
         prev_pos = torch.roll(position, 1, dims=1)
         prev_pos[:, 0] = 0.0
         turnover = torch.abs(position - prev_pos)
@@ -73,8 +74,8 @@ class AshareBacktest:
         avg_cost = (self.buy_cost + self.sell_cost) / 2.0
         tx_cost = turnover * avg_cost
 
-        # PnL（绝对收益）
-        gross_pnl = position * target_ret
+        # PnL：应用熊市减仓系数到收益端（不产生虚假换手成本）
+        gross_pnl = position * target_ret * bear_scale.unsqueeze(0)
         net_pnl = gross_pnl - tx_cost
 
         # 每天 portfolio 收益（按实际持仓权重归一化，熊市减仓时分母会相应减小）
@@ -83,10 +84,10 @@ class AshareBacktest:
         # ---- Fitness 计算 ----
         # 1) Sortino 比率作为主指标
         mean_ret = daily_pnl.mean()
-        neg_returns = daily_pnl[daily_pnl < 0]
-        if len(neg_returns) > 5:
-            downside_std = neg_returns.std()
-        else:
+        # 真正的下行标准差：sqrt(mean(min(R-target, 0)^2))，target=0
+        downside_sq = torch.relu(-daily_pnl).pow(2)
+        downside_std = torch.sqrt(downside_sq.mean() + 1e-12)
+        if downside_std < 1e-8:
             downside_std = daily_pnl.std() + 1e-6
 
         sortino = mean_ret / (downside_std + 1e-6)
@@ -117,21 +118,30 @@ class AshareBacktest:
         if cum_ret < 0:
             neg_return_penalty = min(abs(cum_ret) * 2.0, 1.0)
 
-        # IC 奖励：Spearman 秩相关（截面预测能力）
+        # IC 奖励：Spearman 秩相关（截面预测能力，排除停牌/无效股票）
         ic_bonus = 0.0
         if N_stocks > 10:
-            # 将 NaN 替换为 0 做排名
-            f_clean = torch.nan_to_num(factors[:, :T_len], nan=0.0)
-            alpha_rank = f_clean.argsort(dim=0).argsort(0).float()
-            ret_clean = torch.nan_to_num(target_ret, nan=0.0)
-            ret_rank = ret_clean.argsort(dim=0).argsort(0).float()
-            # Pearson correlation of ranks = Spearman rank correlation
-            a_centered = alpha_rank - alpha_rank.mean(dim=0, keepdim=True)
-            r_centered = ret_rank - ret_rank.mean(dim=0, keepdim=True)
-            ic_per_day = (a_centered * r_centered).sum(dim=0) / (
-                a_centered.norm(dim=0) * r_centered.norm(dim=0) + 1e-6
-            )
-            ic_bonus = ic_per_day.mean() * 5.0
+            # 逐日计算 IC，只使用当天有效股票
+            ic_sum = torch.tensor(0.0, device=factors.device)
+            ic_count = 0
+            for t_i in range(T_len):
+                valid_t = valid_mask[:, t_i]  # [N_stocks]
+                n_valid = valid_t.sum().item()
+                if n_valid < 10:
+                    continue
+                f_t = factors[:, t_i][valid_t]
+                r_t = target_ret[:, t_i][valid_t]
+                if f_t.std() < 1e-8 or r_t.std() < 1e-8:
+                    continue
+                alpha_rank = f_t.argsort().argsort(0).float()
+                ret_rank = r_t.argsort().argsort(0).float()
+                a_c = alpha_rank - alpha_rank.mean()
+                r_c = ret_rank - ret_rank.mean()
+                denom = a_c.norm() * r_c.norm() + 1e-6
+                ic_sum = ic_sum + (a_c * r_c).sum() / denom
+                ic_count += 1
+            if ic_count > 0:
+                ic_bonus = (ic_sum / ic_count) * 5.0
 
         # 综合得分
         fitness = sortino - dd_penalty - turnover_penalty - neg_return_penalty + ic_bonus
@@ -140,11 +150,19 @@ class AshareBacktest:
 
     @staticmethod
     def _rolling_mean_1d(x, window):
-        """对 1D tensor 计算滚动均值。"""
+        """对 1D tensor 计算滚动均值，前期不足 window 时用 expanding mean。"""
         T = x.shape[0]
         if T < window:
-            return torch.zeros_like(x)
-        pad = torch.zeros(window - 1, device=x.device)
-        x_pad = torch.cat([pad, x])
-        windows = x_pad.unfold(0, window, 1)
-        return windows.mean(dim=-1)
+            # 不足一个窗口，全部用 expanding mean
+            cumsum = torch.cumsum(x, dim=0)
+            arange = torch.arange(1, T + 1, device=x.device, dtype=x.dtype)
+            return cumsum / arange
+        cumsum = torch.cumsum(x, dim=0)
+        arange = torch.arange(1, T + 1, device=x.device, dtype=x.dtype)
+        expanding_mean = cumsum / arange
+        # 从第 window 个元素起用固定窗口
+        rolling_sum = cumsum[window - 1:] - torch.cat(
+            [torch.zeros(1, device=x.device), cumsum[:T - window]]
+        )
+        rolling_mean = rolling_sum / window
+        return torch.cat([expanding_mean[:window - 1], rolling_mean])
