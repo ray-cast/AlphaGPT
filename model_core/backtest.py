@@ -16,17 +16,24 @@ class AshareBacktest:
         self.min_turnover = ModelConfig.MIN_TURNOVER_RATE
         self.top_n = ModelConfig.TOP_N_STOCKS
 
-    def evaluate(self, factors, raw_data, target_ret):
+    def evaluate(self, factors, raw_data, target_ret, start_idx=0, end_idx=None):
         """
         Args:
             factors:    [num_stocks, T] alpha 信号（来自 PrefixVM）
             raw_data:   dict，含 'turnover_rate', 'pct_chg'（如有）, 'vol', 'close'
             target_ret: [num_stocks, T] open-to-open 前向收益
+            start_idx:  起始时间索引（含）
+            end_idx:    结束时间索引（不含），None 表示到末尾
         Returns:
             (fitness: scalar tensor, avg_daily_return: float)
         """
         turnover_rate = raw_data.get("turnover_rate",
                             torch.zeros_like(factors))
+
+        # 按指定区间切片
+        factors = factors[:, start_idx:end_idx]
+        target_ret = target_ret[:, start_idx:end_idx]
+        turnover_rate = turnover_rate[:, start_idx:end_idx]
 
         N_stocks, T_len = factors.shape
 
@@ -107,7 +114,7 @@ class AshareBacktest:
         if cum_ret < 0:
             neg_return_penalty = min(abs(cum_ret) * 2.0, 1.0)
 
-        # IC 奖励：截面预测能力（排除停牌日）
+        # IC 奖励：Spearman 秩相关（截面预测能力）
         ic_bonus = 0.0
         if N_stocks > 10:
             # 将 NaN 替换为 0 做排名
@@ -115,8 +122,11 @@ class AshareBacktest:
             alpha_rank = f_clean.argsort(dim=0).argsort(0).float()
             ret_clean = torch.nan_to_num(target_ret, nan=0.0)
             ret_rank = ret_clean.argsort(dim=0).argsort(0).float()
-            ic_per_day = (alpha_rank * ret_rank).sum(dim=0) / (
-                alpha_rank.norm(dim=0) * ret_rank.norm(dim=0) + 1e-6
+            # Pearson correlation of ranks = Spearman rank correlation
+            a_centered = alpha_rank - alpha_rank.mean(dim=0, keepdim=True)
+            r_centered = ret_rank - ret_rank.mean(dim=0, keepdim=True)
+            ic_per_day = (a_centered * r_centered).sum(dim=0) / (
+                a_centered.norm(dim=0) * r_centered.norm(dim=0) + 1e-6
             )
             ic_bonus = ic_per_day.mean() * 5.0
 

@@ -48,6 +48,8 @@ class AlphaEngine:
         self.patience_counter = 0
         self.patience_limit = ModelConfig.PATIENCE_LIMIT
         self.bt = AshareBacktest()
+        self.train_idx = self.loader.train_idx
+        self.test_idx = self.loader.test_idx
 
         self.best_score = -float("inf")
         self.best_formula = None
@@ -121,6 +123,7 @@ class AlphaEngine:
             open_slots = torch.ones(bs, dtype=torch.long, device=ModelConfig.DEVICE)
 
             log_probs = []
+            entropies = []
             values = []
             tokens_list = []
             open_slots_history = []
@@ -138,6 +141,7 @@ class AlphaEngine:
                 action = dist.sample()
 
                 log_probs.append(dist.log_prob(action))
+                entropies.append(dist.entropy())
                 values.append(val)
                 tokens_list.append(action)
                 inp = torch.cat([inp, action.unsqueeze(1)], dim=1)
@@ -180,7 +184,8 @@ class AlphaEngine:
                     continue
 
                 score, ret_val = self.bt.evaluate(
-                    res, self.loader.raw_data_cache, self.loader.target_ret
+                    res, self.loader.raw_data_cache, self.loader.target_ret,
+                    end_idx=self.train_idx
                 )
 
                 # 新颖性奖励：首次出现的公式获得额外 bonus
@@ -193,12 +198,21 @@ class AlphaEngine:
                 rewards[i] = final_score
 
                 if final_score.item() > self.best_score:
+                    # OOS 测试集验证：过拟合保护
+                    oos_score, oos_ret = self.bt.evaluate(
+                        res, self.loader.raw_data_cache, self.loader.target_ret,
+                        start_idx=self.train_idx, end_idx=self.test_idx
+                    )
+                    if oos_score < -1.0:
+                        # 测试集严重失效，跳过不更新 best
+                        continue
                     self.best_score = final_score.item()
                     self.best_formula = trimmed
                     self.patience_counter = 0  # 重置早停计数器
                     decoded = self._decode(trimmed)
                     tqdm.write(
                         f"[!] New Best: Score {final_score:.2f} "
+                        f"(OOS={oos_score:.2f}) "
                         f"CumRet {ret_val:.2%} | {decoded}"
                     )
 
@@ -238,7 +252,11 @@ class AlphaEngine:
                         diversity_bonus[i] = -ModelConfig.DIVERSITY_PENALTY * (count / bs)
 
             adv = adv + length_bonus + diversity_bonus
-            adv = adv - adv.mean()  # 去均值，确保 baselined
+
+            # Critic baseline：用 value prediction 减去均值后的优势
+            value_pred = torch.stack(values, 1).squeeze(-1).mean(dim=1)
+            adv = adv - value_pred.detach()  # 用 critic 预测作为 baseline
+            adv = adv - adv.mean()  # 去均值
 
             # Per-timestep advantage masking：只对 active steps 应用 advantage
             open_slots_at_t = torch.stack(open_slots_history, dim=1)  # [bs, MAX_FORMULA_LEN]
@@ -249,11 +267,10 @@ class AlphaEngine:
                 active = (open_slots_at_t[:, t] > 0).float()
                 step_adv = adv * active
                 policy_loss += -log_probs[t] * step_adv
-                entropy += -(log_probs[t].exp() * log_probs[t]).sum()
+                entropy += entropies[t].sum()
             policy_loss = policy_loss.mean()
 
-            # Critic value loss
-            value_pred = torch.stack(values, 1).squeeze(-1).mean(dim=1)
+            # Critic value loss（value_pred 已在上方计算）
             value_loss = F.mse_loss(value_pred, rewards.detach())
 
             # Entropy bonus：线性退火，去掉 / bs 使 entropy 系数真正有效

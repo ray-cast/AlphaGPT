@@ -38,7 +38,12 @@ class PrefixVM:
                 func = self.op_map[token]
                 res = func(*args)
                 if torch.isnan(res).any() or torch.isinf(res).any():
+                    # 记录哪些位置是输入 NaN（停牌标记），清洗后再恢复
+                    input_nan_mask = torch.zeros_like(res, dtype=torch.bool)
+                    for a in args:
+                        input_nan_mask |= torch.isnan(a)
                     res = torch.nan_to_num(res, nan=0.0, posinf=1.0, neginf=-1.0)
+                    res[input_nan_mask] = float('nan')
                 return res
             else:
                 return None

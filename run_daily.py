@@ -72,9 +72,18 @@ def _run_report(eng):
         return
 
     report = StrategyReport(eng.loader)
-    metrics, daily_ret, bench_daily, oos_dates = report.evaluate(alpha_values)
+
+    # 测试集评估
+    metrics, daily_ret, bench_daily, oos_dates = report.evaluate(alpha_values, split_type="test")
+    print("\n>>> 测试集评估")
     report.print_report(metrics, oos_dates)
-    report.plot_equity(daily_ret, bench_daily, oos_dates)
+    report.plot_equity(daily_ret, bench_daily, oos_dates, suffix="_test")
+
+    # 验证集评估
+    metrics, daily_ret, bench_daily, oos_dates = report.evaluate(alpha_values, split_type="val")
+    print("\n>>> 验证集评估")
+    report.print_report(metrics, oos_dates)
+    report.plot_equity(daily_ret, bench_daily, oos_dates, suffix="_val")
 
 
 def run_signal_only():
@@ -132,9 +141,14 @@ def run_signal_only():
 
     # OOS 业绩评估
     report = StrategyReport(loader)
-    metrics, daily_ret, bench_daily, oos_dates = report.evaluate(alpha_values)
+    metrics, daily_ret, bench_daily, oos_dates = report.evaluate(alpha_values, split_type="test")
+    print("\n>>> 测试集评估")
     report.print_report(metrics, oos_dates)
-    report.plot_equity(daily_ret, bench_daily, oos_dates)
+    report.plot_equity(daily_ret, bench_daily, oos_dates, suffix="_test")
+    metrics, daily_ret, bench_daily, oos_dates = report.evaluate(alpha_values, split_type="val")
+    print("\n>>> 验证集评估")
+    report.print_report(metrics, oos_dates)
+    report.plot_equity(daily_ret, bench_daily, oos_dates, suffix="_val")
 
     # 打印今日 Top30
     print_top_picks(loader, alpha_values)
@@ -142,8 +156,7 @@ def run_signal_only():
 
 def print_top_picks(loader, alpha_values):
     """打印最新交易日的 Top30 选股。"""
-    oos_start = loader.split_idx
-    if oos_start is None or oos_start >= alpha_values.shape[1]:
+    if loader.test_idx is None or loader.test_idx >= alpha_values.shape[1]:
         print("无样本外数据")
         return
 

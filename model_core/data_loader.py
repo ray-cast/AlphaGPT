@@ -17,7 +17,8 @@ class AshareDataLoader:
         self.target_ret = None         # [num_stocks, T]
         self.stock_codes = []          # list[str]
         self.dates = None              # pd.DatetimeIndex
-        self.split_idx = None          # 80/20 训练/测试切分点
+        self.train_idx = None          # 训练集截止索引（不含）
+        self.test_idx = None           # 测试集截止索引（不含）
 
     def load_data(self):
         print("从 CSV 加载A股数据...")
@@ -95,31 +96,30 @@ class AshareDataLoader:
         if "turnover_rate" in master.columns:
             self.raw_data_cache["turnover_rate"] = to_tensor("turnover_rate")
         else:
+            print("[WARN] 数据中无 turnover_rate 列，用成交量代理计算换手率")
             T = self.raw_data_cache["close"].shape[1]
             N = self.raw_data_cache["close"].shape[0]
-            self.raw_data_cache["turnover_rate"] = torch.zeros(
-                (N, T), dtype=torch.float32, device=ModelConfig.DEVICE
-            )
+            # 用成交量 / 成交量20日均值 作为流动性代理（>1 视为有流动性）
+            vol = self.raw_data_cache["vol"]
+            vol_ma20 = torch.zeros_like(vol)
+            if T >= 20:
+                cum = torch.cumsum(vol, dim=1)
+                vol_ma20[:, 19] = cum[:, 19] / 20.0
+                vol_ma20[:, 20:] = (cum[:, 20:] - cum[:, :-20]) / 20.0
+            vol_ratio = vol / (vol_ma20 + 1e-9)
+            self.raw_data_cache["turnover_rate"] = vol_ratio
 
         self.dates = sorted(common_dates)
 
         # 4.5 按配置的日期范围裁剪
-        start_dt = ModelConfig.TRAIN_START_DATE
-        end_dt = ModelConfig.TRAIN_END_DATE
-        if start_dt or end_dt:
-            mask = [True] * len(self.dates)
-            for i, d in enumerate(self.dates):
-                d_int = int(d)
-                if start_dt and d_int < int(start_dt):
-                    mask[i] = False
-                if end_dt and d_int > int(end_dt):
-                    mask[i] = False
-            keep_indices = [i for i, m in enumerate(mask) if m]
+        start_dt = ModelConfig.DATA_START_DATE
+        if start_dt:
+            keep_indices = [i for i, d in enumerate(self.dates) if int(d) >= int(start_dt)]
             if keep_indices:
-                s, e = keep_indices[0], keep_indices[-1] + 1
-                self.dates = self.dates[s:e]
+                s = keep_indices[0]
+                self.dates = self.dates[s:]
                 for key in self.raw_data_cache:
-                    self.raw_data_cache[key] = self.raw_data_cache[key][:, s:e]
+                    self.raw_data_cache[key] = self.raw_data_cache[key][:, s:]
 
         # 5. 计算因子
         self.feat_tensor = FeatureEngineer.compute_features(self.raw_data_cache)
@@ -139,10 +139,36 @@ class AshareDataLoader:
         # 复牌跳空极端收益截断（A股涨跌停 ±10%/±20%，超过 ±25% 视为异常）
         self.target_ret = self.target_ret.clamp(-0.25, 0.25)
 
-        # 7. 报告切分点（仅用于 report / signal_writer 标注 OOS 区间）
-        self.split_idx = int(len(self.dates) * 0.8)
+        # 7. 训练/测试/验证三集切分
+        self.train_idx = 0  # 默认值
+        self.test_idx = 0   # 默认值
+        train_end = int(ModelConfig.TRAIN_END_DATE)
+        test_end = int(ModelConfig.TEST_END_DATE)
+        for i, d in enumerate(self.dates):
+            d_int = int(d)
+            if d_int <= train_end:
+                self.train_idx = i + 1
+            if d_int <= test_end:
+                self.test_idx = i + 1
+
+        # 边界校验
+        T = len(self.dates)
+        if self.train_idx < 60:
+            raise ValueError(
+                f"训练集不足 60 个交易日（仅 {self.train_idx} 天），"
+                f"请检查 DATA_START_DATE / TRAIN_END_DATE 配置或数据完整性"
+            )
+        if self.test_idx <= self.train_idx:
+            raise ValueError(
+                f"测试集为空（train_idx={self.train_idx}, test_idx={self.test_idx}），"
+                f"请检查 TRAIN_END_DATE / TEST_END_DATE 配置或数据完整性"
+            )
+        if T - self.test_idx < 20:
+            print(f"[WARN] 验证集仅 {T - self.test_idx} 个交易日，统计指标可能不可靠")
 
         N, T = self.raw_data_cache["close"].shape
         print(f"数据加载完成: {N} 只股票, {T} 个交易日, {self.feat_tensor.shape[1]} 个因子")
-        print(f"  训练集: {self.dates[0]} ~ {self.dates[self.split_idx-1]}")
-        print(f"  测试集: {self.dates[self.split_idx]} ~ {self.dates[-1]}")
+        if self.train_idx > 0 and self.test_idx > self.train_idx:
+            print(f"  训练集: {self.dates[0]} ~ {self.dates[self.train_idx-1]} ({self.train_idx} 天)")
+            print(f"  测试集: {self.dates[self.train_idx]} ~ {self.dates[self.test_idx-1]} ({self.test_idx - self.train_idx} 天)")
+            print(f"  验证集: {self.dates[self.test_idx]} ~ {self.dates[-1]} ({T - self.test_idx} 天)")

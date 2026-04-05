@@ -3,10 +3,18 @@ import torch.nn as nn
 
 
 def robust_norm(t):
-    """MAD 鲁棒标准化，截面维度（每只股票独立标准化）。NaN 位置保留 NaN。"""
-    median = torch.nanmedian(t, dim=1, keepdim=True)[0]
-    mad = torch.nanmedian(torch.abs(t - median), dim=1, keepdim=True)[0] + 1e-6
-    norm = (t - median) / mad
+    """MAD 鲁棒标准化，expanding window 避免未来数据泄漏。NaN 位置保留 NaN。
+    沿 dim=1（时间轴）使用 expanding window：时刻 i 的统计量只用 [0, i] 区间数据。
+    """
+    N, T = t.shape
+    # 预计算 expanding median 和 expanding MAD（避免 look-ahead）
+    median_out = torch.zeros_like(t)
+    mad_out = torch.zeros_like(t)
+    for i in range(T):
+        col = t[:, :i + 1]  # 只用 [0, i]
+        median_out[:, i] = torch.nanmedian(col, dim=1)[0]
+        mad_out[:, i] = torch.nanmedian(torch.abs(col - median_out[:, i:i+1]), dim=1)[0] + 1e-6
+    norm = (t - median_out) / mad_out
     norm = torch.clamp(norm, -5.0, 5.0)
     # 保留原始 NaN 位置（停牌日）
     norm = torch.where(torch.isnan(t), torch.full_like(t, float('nan')), norm)
@@ -14,13 +22,23 @@ def robust_norm(t):
 
 
 def _rolling_mean(x, window):
-    """沿 dim=1 的滚动均值。"""
+    """沿 dim=1 的 expanding window 均值：前 window-1 天用 expanding，之后用固定窗口。"""
     N, T = x.shape
     if T < window:
-        return x
-    pad = torch.zeros((N, window - 1), device=x.device)
-    x_pad = torch.cat([pad, x], dim=1)
-    return x_pad.unfold(1, window, 1).mean(dim=-1)
+        # T < window 时用 expanding mean
+        cumsum = torch.cumsum(x, dim=1)
+        arange = torch.arange(1, T + 1, device=x.device).unsqueeze(0)
+        return cumsum / arange
+    # 前 window-1 天用 expanding mean
+    cumsum = torch.cumsum(x, dim=1)
+    arange = torch.arange(1, T + 1, device=x.device).unsqueeze(0).float()
+    expanding_mean = cumsum / arange
+    # 第 window 天起用固定窗口滚动均值
+    rolling_sum = cumsum[:, window - 1:] - torch.cat(
+        [torch.zeros(N, 1, device=x.device), cumsum[:, :T - window]], dim=1)
+    rolling_mean = rolling_sum / window
+    result = torch.cat([expanding_mean[:, :window - 1], rolling_mean], dim=1)
+    return result
 
 
 class FeatureEngineer:

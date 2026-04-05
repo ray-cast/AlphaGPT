@@ -7,17 +7,19 @@ import numpy as np
 import pandas as pd
 import torch
 
+from .config import ModelConfig
+
 
 class SignalWriter:
     def __init__(self, loader):
         """
         Args:
-            loader: AshareDataLoader 实例（含 stock_codes, dates, split_idx, raw_data_cache）
+            loader: AshareDataLoader 实例（含 stock_codes, dates, test_idx, raw_data_cache）
         """
         self.loader = loader
         self.stock_codes = loader.stock_codes
         self.dates = loader.dates
-        self.split_idx = loader.split_idx
+        self.test_idx = loader.test_idx
 
         # 预计算市场趋势指标（close / MA60 - 1，经 tanh 压缩）
         close = loader.raw_data_cache["close"]  # [num_stocks, T]
@@ -43,23 +45,23 @@ class SignalWriter:
         """
         os.makedirs(output_dir, exist_ok=True)
 
-        # 只输出样本外日期
-        oos_start = self.split_idx
-        oos_dates = self.dates[oos_start:]
-        alpha_oos = alpha_values[:, oos_start:]
-        trend_oos = self.market_trend[oos_start:]
+        # 只输出验证集日期
+        val_start = self.test_idx
+        val_dates = self.dates[val_start:]
+        alpha_val = alpha_values[:, val_start:]
+        trend_val = self.market_trend[val_start:]
 
-        if alpha_oos.shape[1] != len(oos_dates):
-            print(f"[WARN] alpha 维度 {alpha_oos.shape[1]} 与日期数 {len(oos_dates)} 不匹配")
-            min_len = min(alpha_oos.shape[1], len(oos_dates))
-            oos_dates = oos_dates[:min_len]
-            alpha_oos = alpha_oos[:, :min_len]
-            trend_oos = trend_oos[:min_len]
+        if alpha_val.shape[1] != len(val_dates):
+            print(f"[WARN] alpha 维度 {alpha_val.shape[1]} 与日期数 {len(val_dates)} 不匹配")
+            min_len = min(alpha_val.shape[1], len(val_dates))
+            val_dates = val_dates[:min_len]
+            alpha_val = alpha_val[:, :min_len]
+            trend_val = trend_val[:min_len]
 
         rows = []
-        for t_idx, date in enumerate(oos_dates):
-            col = alpha_oos[:, t_idx].cpu().numpy()
-            trend_score = float(trend_oos[t_idx].cpu())
+        for t_idx, date in enumerate(val_dates):
+            col = alpha_val[:, t_idx].cpu().numpy()
+            trend_score = float(trend_val[t_idx].cpu())
 
             # 截面中位数作为多空分界线
             median_score = np.median(col)
@@ -92,12 +94,13 @@ class SignalWriter:
         out_path = os.path.join(run_dir, "signals_all.csv")
         df.to_csv(out_path, index=False, encoding="utf-8-sig")
 
-        # 额外输出：每天只保留 top30 的精简版
-        df_top = df[df["rank"] <= 30]
-        top_path = os.path.join(run_dir, "signals_top30.csv")
+        # 额外输出：每天只保留 top N 的精简版
+        top_n = ModelConfig.TOP_N_STOCKS
+        df_top = df[df["rank"] <= top_n]
+        top_path = os.path.join(run_dir, f"signals_top{top_n}.csv")
         df_top.to_csv(top_path, index=False, encoding="utf-8-sig")
 
         print(f"信号已写入:")
         print(f"  完整版: {out_path} ({len(df)} 行)")
-        print(f"  Top30:  {top_path} ({len(df_top)} 行)")
-        print(f"  日期范围: {oos_dates[0]} ~ {oos_dates[-1]}")
+        print(f"  Top{top_n}:  {top_path} ({len(df_top)} 行)")
+        print(f"  日期范围: {val_dates[0]} ~ {val_dates[-1]}")

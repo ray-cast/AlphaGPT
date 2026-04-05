@@ -18,29 +18,35 @@ class StrategyReport:
         self.sell_cost = ModelConfig.TOTAL_SELL_COST
         self.min_turnover = ModelConfig.MIN_TURNOVER_RATE
 
-    def evaluate(self, alpha_values):
+    def evaluate(self, alpha_values, split_type="val"):
         """
-        在 OOS 区间评估策略表现。
+        在指定区间评估策略表现。
 
         Args:
             alpha_values: [num_stocks, T] 来自 PrefixVM 的 alpha 分值
+            split_type: "test"（测试集）或 "val"（验证集）
         Returns:
             metrics: dict，含 ann_ret / ann_vol / sharpe / max_dd / calmar / turnover
             daily_ret: np.ndarray [T_oos] 每日组合收益
             bench_ret: np.ndarray [T_oos] 每日基准收益
+            oos_dates: list of date strings
         """
         loader = self.loader
-        split = loader.split_idx
+        if split_type == "test":
+            start = loader.train_idx
+            end = loader.test_idx
+        else:
+            start = loader.test_idx
+            end = None
         target_ret = loader.target_ret  # [num_stocks, T]
         turnover_rate = loader.raw_data_cache.get(
             "turnover_rate", torch.zeros_like(alpha_values)
         )
 
-        # OOS 区间
-        alpha_oos = alpha_values[:, split:]
-        target_oos = target_ret[:, split:]
-        turnover_oos = turnover_rate[:, split:]
-        oos_dates = loader.dates[split:]
+        alpha_oos = alpha_values[:, start:end]
+        target_oos = target_ret[:, start:end]
+        turnover_oos = turnover_rate[:, start:end]
+        oos_dates = loader.dates[start:end]
 
         N, T = alpha_oos.shape
 
@@ -148,7 +154,7 @@ class StrategyReport:
         print(f"  Excess Total    : {metrics['excess_total']:+.2%}")
         print("=" * 60)
 
-    def plot_equity(self, daily_ret, bench_daily, oos_dates):
+    def plot_equity(self, daily_ret, bench_daily, oos_dates, suffix=""):
         """绘制策略 vs 基准净值曲线。"""
         equity = np.cumprod(1 + daily_ret)
         bench_equity = np.cumprod(1 + bench_daily)
@@ -184,7 +190,7 @@ class StrategyReport:
         )
         os.makedirs(report_dir, exist_ok=True)
         run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = os.path.join(report_dir, f"oos_performance_{run_id}.png")
+        path = os.path.join(report_dir, f"oos_performance_{run_id}{suffix}.png")
         fig.savefig(path, dpi=150)
         plt.close(fig)
         print(f"  Equity curve saved: {path}")

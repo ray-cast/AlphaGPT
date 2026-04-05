@@ -1,6 +1,6 @@
 AlphaGPT 仓库速读
 
-这是一套 AI 驱动的沪深300量化选股系统。核心思路：用 Transformer 模型自动生成可解释的 Alpha 因子公式，通过截面回测打分筛选，输出每日 Top 30 选股信号。
+这是一套 AI 驱动的沪深300量化选股系统。核心思路：用 Transformer 模型自动生成可解释的 Alpha 因子公式，通过截面回测打分筛选，输出每日 Top N 选股信号。
 
 代码组织（按功能划分）
 - run_daily.py：每日策略入口（数据更新 -> 训练 -> 信号输出，一步到位）
@@ -9,7 +9,7 @@ AlphaGPT 仓库速读
 - times.py：独立实验脚本，单 ETF Alpha 挖矿（研究用，与主流程无关）。
 - model_core/：核心模块，策略挖掘引擎。
   - config.py：A 股参数配置（佣金万2.5、印花税千1、涨跌停、T+1 等）。
-  - data_loader.py：AshareDataLoader，从 CSV 构建特征张量 [num_stocks, 9, T]。
+  - data_loader.py：AshareDataLoader，从 CSV 构建特征张量 [num_stocks, 14, T]。
   - factors.py：FeatureEngineer，9 维因子计算与截面标准化。
   - ops.py：12 个数学算子（ADD, SUB, GATE, DECAY 等）。
   - vm.py：StackVM，栈式虚拟机，正序执行公式 token 序列。
@@ -36,7 +36,7 @@ AlphaGPT 仓库速读
 核心思想
 - 不是直接预测价格，而是"生成公式 -> 解释执行 -> 回测评分 -> 优化生成器"。
 - 公式 = token 序列；token 由"特征 + 算子"组成，StackVM 正序执行成因子信号。
-- 截面选股：每日对沪深300成分股打分排序，做多 Top 30。
+- 截面选股：每日对沪深300成分股打分排序，做多 Top N。
 
 当前因子与算子一览
 - 因子（FeatureEngineer，14 维）
@@ -83,19 +83,18 @@ AlphaGPT 仓库速读
 - 佣金：万 2.5（双边）。印花税：千 1（卖出）。
 - 涨跌停：主板 10% / 创业板科创板 20%。
 - 换手率过滤：<0.5% 视为停牌/流动性不足，排除。
-- 选股数量：Top 30（截面排名前 30）。
-- 训练步数：500 步，batch=1024，公式最大长度 10 tokens。
+- 选股数量：Top N（截面排名前 10）。
+- 训练步数：500 步，batch=1024，公式最大长度 15 tokens。
 
 信号输出
-- best_ashare_strategy.json：最佳因子公式及得分。
-- training_history.json：训练历史记录。
-- signals/{timestamp}/signals_top30.csv：最新交易日 Top 30 选股。
+- training_history.json：训练历史记录，最佳因子公式及得分。
+- signals/{timestamp}/signals_top10.csv：最新交易日 Top N 选股。
 - signals/{timestamp}/signals_all.csv：全部股票信号排名（含 direction 和 market_trend 列）。
 - direction 基于截面中位数区分多空；market_trend 列（沪深300 均价/MA60 趋势），趋势向下时 direction=0（观望）。
 
 times.py 与 model_core 的差异
 - times.py：单 ETF 时序择时（做多/做空/空仓），5 维特征，10 个算子（含 DELTA5/TS_ZSCORE/TS_RANK 等 WorldQuant 风格时序算子），标准 Transformer + REINFORCE。
-- model_core：沪深300截面选股（Top 30），9 维特征，12 个算子（含 GATE/JUMP/DECAY 等逻辑算子），增强 Transformer（Looped + SwiGLU + QK-Norm + LoRD）。
+- model_core：沪深300截面选股（Top N），14 维特征，12 个算子（含 GATE/JUMP/DECAY 等逻辑算子），增强 Transformer（Looped + SwiGLU + QK-Norm + LoRD）。
 - 两者公式解析方向不同：times.py 逆序（RPN），model_core 正序（StackVM）。
 
 现状与依赖
