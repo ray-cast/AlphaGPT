@@ -179,7 +179,7 @@ class Indicators:
         return eps_ttm * roe * 100.0
 
 class FeatureEngineer:
-    INPUT_DIM = 15
+    INPUT_DIM = 11
 
     @staticmethod
     def compute_features(raw_dict):
@@ -225,40 +225,27 @@ class FeatureEngineer:
         # ---- 因子 8: 价格 vs 60日均线（趋势） ----
         trend = Indicators.trend(c, 60)
 
-        # ---- 因子 9: 成交额加速度（FOMO） ----
-        fomo = Indicators.amount_acceleration(amt, 20)
-
-        # ---- 因子 10: 波动率聚集（VOL_CLUSTER） ----
-        vol_cluster = Indicators.vol_cluster(c, 5, 20)
-
-        # ---- 因子 11: 高低价振幅（HL_RANGE） ----
+        # ---- 因子 9: 高低价振幅（HL_RANGE） ----
         hl_range = Indicators.hl_range(h, l, c)
 
-        # ---- 因子 12: 收盘在区间位置（CLOSE_POS） ----
+        # ---- 因子 10: 收盘在区间位置（CLOSE_POS） ----
         close_pos = Indicators.close_position(c, h, l)
 
-        # ---- 因子 13: 已实现波动率（REALIZED_VOL） ----
-        realized_vol = Indicators.volatility_clustering(c, 20)
-
-        # ---- 因子 14: 价值锚 P_value (EPS_TTM × ROE × 100) ----
+        # ---- 因子 11: 价值锚 P_value (EPS_TTM × ROE × 100) ----
         p_value = Indicators.p_value(c, raw_dict.get("pe_ttm"), raw_dict.get("roe"))
 
         features = torch.stack([
             robust_norm(ret),          # [0] RET
             robust_norm(ret5),         # [1] RET5
             robust_norm(vol_chg),      # [2] VOL_CHG
-            robust_norm(amt_ratio),    # [3] AMT_RAT
-            turn_normed,               # [4] TURN
-            robust_norm(pressure),     # [5] PRESSURE
-            robust_norm(dev),          # [6] DEV
-            robust_norm(rel_strength), # [7] RSI
-            robust_norm(trend),        # [8] TREND
-            robust_norm(fomo),         # [9] FOMO
-            robust_norm(vol_cluster),  # [10] VOL_CLUSTER
-            robust_norm(hl_range),     # [11] HL_RANGE
-            robust_norm(close_pos),    # [12] CLOSE_POS
-            robust_norm(realized_vol), # [13] REALIZED_VOL
-            robust_norm(p_value),      # [14] P_VALUE
+            turn_normed,               # [3] TURN
+            robust_norm(pressure),     # [4] PRESSURE
+            robust_norm(dev),          # [5] DEV
+            robust_norm(rel_strength), # [6] RSI
+            robust_norm(trend),        # [7] TREND
+            robust_norm(hl_range),     # [8] HL_RANGE
+            robust_norm(close_pos),    # [9] CLOSE_POS
+            robust_norm(p_value),      # [10] P_VALUE
         ], dim=1)
 
         # 清理 Inf（但保留 NaN 标记停牌日）

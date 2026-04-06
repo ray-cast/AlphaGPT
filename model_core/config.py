@@ -48,7 +48,7 @@ class ModelConfig:
     ENTROPY_COEF_END = 0.01        # 终止 entropy 系数
 
     # ---------- 因子维度 ----------
-    INPUT_DIM = 15
+    INPUT_DIM = 11
 
     # ---------- 信号输出 ----------
     SIGNAL_DIR = os.path.join(_PROJECT_ROOT, "signals")
