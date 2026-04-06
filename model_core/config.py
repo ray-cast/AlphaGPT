@@ -35,8 +35,8 @@ class ModelConfig:
     MIN_TURNOVER_RATE = 0.005      # 最低换手率（过滤停牌/流动性不足）
 
     # ---------- 早停 ----------
-    PATIENCE_LIMIT = 25           # 连续 N 步无新 best 则早停
-    MIN_TRAIN_STEPS = 150         # 至少跑 N 步再允许早停（确保课程学习有时间展开）
+    PATIENCE_LIMIT = 50           # 连续 N 步无新 best 则早停
+    MIN_TRAIN_STEPS = 300         # 至少跑 N 步再允许早停（等 entropy 退火到 ≈0.06）
 
     # ---------- 探索与多样性 ----------
     ENTROPY_COEF_START = 0.20      # 起始 entropy 系数
