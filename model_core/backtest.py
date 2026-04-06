@@ -135,18 +135,14 @@ class AshareBacktest:
         max_dd = drawdown.min()
         dd_penalty = torch.relu(-max_dd - 0.05) * 2.0
 
-        # === 换手率惩罚（连续化替代硬阈值）===
-        avg_turnover = turnover.mean()
-        turnover_penalty = torch.relu(avg_turnover - 0.3) * 3.0
-
         # === IC 奖励（截面预测能力）===
         ic_bonus = 0.0
         if N_stocks > 10 and sortino.item() > -2.0:
             ic_bonus = self._vectorized_ic(factors, target_ret, valid_mask, T_len, N_stocks)
 
-        # 综合得分：方向性 30% + 风险调整 40% + IC 30% - 惩罚项
+        # 综合得分：方向性 30% + 风险调整 40% + IC 30% - 回撤惩罚
         fitness = (0.3 * direction_score + 0.4 * risk_score
-                   + 0.3 * ic_bonus - dd_penalty - turnover_penalty)
+                   + 0.3 * ic_bonus - dd_penalty)
 
         return fitness, cum_ret.item()
 
