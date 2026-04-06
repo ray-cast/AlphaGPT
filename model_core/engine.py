@@ -91,13 +91,26 @@ class AlphaEngine:
         seeds = [s for s in seeds if len(s) <= max_len]
         return seeds
 
-    def _get_strict_mask(self, open_slots, step):
+    def _get_curriculum_max_len(self, step):
+        """根据课程学习计划返回当前步数的公式最大长度。"""
+        schedule = ModelConfig.CURRICULUM_SCHEDULE
+        if schedule is None:
+            return ModelConfig.MAX_FORMULA_LEN
+        max_len = ModelConfig.MAX_FORMULA_LEN
+        for threshold, length in schedule:
+            if step >= threshold:
+                max_len = length
+        return min(max_len, ModelConfig.MAX_FORMULA_LEN)
+
+    def _get_strict_mask(self, open_slots, step, max_len=None):
         """严格 Action Masking：确保生成合法的前缀表达式树。"""
+        if max_len is None:
+            max_len = ModelConfig.MAX_FORMULA_LEN
         feat_count = len(self.model.features_list)
         vocab_size = self.model.vocab_size
         B = open_slots.shape[0]
         mask = torch.full((B, vocab_size), float('-inf'), device=ModelConfig.DEVICE)
-        remaining_steps = ModelConfig.MAX_FORMULA_LEN - step
+        remaining_steps = max_len - step
 
         # 已完成（open_slots==0）→ pad 第一个 feature，保证序列合法
         done_mask = (open_slots == 0)
@@ -132,7 +145,8 @@ class AlphaEngine:
     def train(self):
         lord_info = " (LoRD)" if self.use_lord else ""
         sft_info = f" (SFT {self.sft_steps} steps)" if self.seed_formulas else ""
-        print(f"开始沪深300 Alpha Mining{lord_info}{sft_info}...")
+        curriculum_info = " (Curriculum)" if ModelConfig.CURRICULUM_SCHEDULE else ""
+        print(f"开始沪深300 Alpha Mining{lord_info}{sft_info}{curriculum_info}...")
 
         # ========== SFT 预训练：从已知好公式热启动 ==========
         if self.seed_formulas:
@@ -149,7 +163,15 @@ class AlphaEngine:
             arity_tens[feat_count + i] = cfg[2]
             arity_map[feat_count + i] = cfg[2]
 
+        prev_max_len = None
         for step in pbar:
+            # 课程学习：获取当前最大公式长度
+            current_max_len = self._get_curriculum_max_len(step)
+            if prev_max_len is not None and current_max_len != prev_max_len:
+                tqdm.write(f"[Curriculum] MAX_LEN {prev_max_len} → {current_max_len} at step {step}")
+                self.patience_counter = 0  # 新搜索空间需要探索时间
+            prev_max_len = current_max_len
+
             bs = ModelConfig.BATCH_SIZE
             inp = torch.zeros((bs, 1), dtype=torch.long, device=ModelConfig.DEVICE)
             open_slots = torch.ones(bs, dtype=torch.long, device=ModelConfig.DEVICE)
@@ -161,9 +183,9 @@ class AlphaEngine:
             open_slots_history = []
             warmup_active = step < ModelConfig.WARMUP_STEPS
 
-            for t in range(ModelConfig.MAX_FORMULA_LEN):
+            for t in range(current_max_len):
                 logits, val, _ = self.model(inp)
-                mask = self._get_strict_mask(open_slots, t)
+                mask = self._get_strict_mask(open_slots, t, current_max_len)
                 if warmup_active:
                     # Warm-up 阶段：均匀采样（mask 仍生效保证合法性）
                     uniform_logits = torch.zeros_like(logits)
@@ -234,21 +256,13 @@ class AlphaEngine:
                     if val_score < -1.0:
                         # 熊市验证集严重失效，跳过不更新 best
                         continue
-                    # OOS 测试集验证：过拟合保护
-                    oos_score, oos_ret = self.bt.evaluate(
-                        res, self.loader.raw_data_cache, self.loader.target_ret,
-                        start_idx=self.train_idx, end_idx=self.test_idx
-                    )
-                    if oos_score < -1.0:
-                        # 测试集严重失效，跳过不更新 best
-                        continue
                     self.best_score = score.item()
                     self.best_formula = trimmed
                     self.patience_counter = 0  # 重置早停计数器
                     decoded = self._decode(trimmed)
                     tqdm.write(
                         f"[!] New Best: Score {score:.2f} "
-                        f"(Val={val_score:.2f}, OOS={oos_score:.2f}) "
+                        f"(Val={val_score:.2f}) "
                         f"CumRet {ret_val:.2%} | {decoded}"
                     )
 
@@ -321,6 +335,7 @@ class AlphaEngine:
                 "Best": f"{self.best_score:.3f}",
                 "Loss": f"{total_loss_val:.2f}",
                 "Unique": f"{unique_ratio:.0%}",
+                "Len": current_max_len,
             }
 
             if self.use_lord and step % 100 == 0:
