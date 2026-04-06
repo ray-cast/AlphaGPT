@@ -44,8 +44,8 @@ class ModelConfig:
     GRAD_CLIP_NORM = 0.5     # 梯度裁剪范数
 
     # ---------- 探索与多样性 ----------
-    ENTROPY_COEF_START = 0.20      # 起始 entropy 系数
-    ENTROPY_COEF_END = 0.02        # 终止 entropy 系数
+    ENTROPY_COEF_START = 0.08      # 起始 entropy 系数
+    ENTROPY_COEF_END = 0.01        # 终止 entropy 系数
 
     # ---------- 因子维度 ----------
     INPUT_DIM = 15
