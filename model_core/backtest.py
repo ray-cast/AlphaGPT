@@ -65,30 +65,17 @@ class AshareBacktest:
         market_daily_ret = valid_target.sum(dim=0) / valid_count
         market_ma20 = self._rolling_mean_1d(market_daily_ret, 20)
 
-        # 构建持仓矩阵（引入换手惩罚阈值）
+        # 构建持仓矩阵
         rank_gap = ModelConfig.REBALANCE_RANK_GAP
         position = self._build_position(scores, valid_mask, self.top_n, rank_gap, self.rebalance_freq)
 
-        # 熊市应对：用估值安全边际替代二值减仓开关
-        # 当市场弱势（MA20<0）时，低估值股票天然抗跌，无需粗暴砍半仓
-        # 改为：熊市时给低估值持仓更大权重，高估值持仓更小权重
+        # 熊市缩仓：MA20<0 时统一缩减到 75%
         bear_mask = market_ma20 < 0
-        if pe_ttm is not None and roe is not None and bear_mask.any():
-            # 计算持仓股票的估值安全边际（与 filter.py 同逻辑）
-            margin = roe / (pe_ttm + 1e-9) * 100.0
-            # 低估（margin>1）→ 缩减系数小（接近1），高估 → 缩减系数大（接近0.5）
-            bear_scale_stock = 0.5 + 0.5 * torch.sigmoid((margin - 0.8) * 5.0)
-            bear_scale_stock = bear_scale_stock.clamp(0.3, 1.0)
-            # 只在熊市日应用，牛市日不缩减
-            bear_scale = torch.ones(T_len, device=factors.device)
-            bear_scale[bear_mask] = 0.75  # 熊市基础缩减到75%
-            # 个股维度：持仓 × 估值系数 × 熊市基础系数
-            stock_scale = bear_scale.unsqueeze(0).expand_as(position) * bear_scale_stock
-            stock_scale[:, ~bear_mask] = 1.0  # 牛市日不缩减
-        else:
-            stock_scale = torch.ones_like(position)
+        stock_scale = torch.ones_like(position)
+        if bear_mask.any():
+            stock_scale[:, bear_mask] = 0.75
 
-        # 换手（基于实际选股变化，不含熊市虚拟减仓）
+        # 换手
         prev_pos = torch.roll(position, 1, dims=1)
         prev_pos[:, 0] = 0.0
         turnover = torch.abs(position - prev_pos)
@@ -104,7 +91,7 @@ class AshareBacktest:
         # 每天 portfolio 收益（按实际持仓权重归一化，熊市减仓时分母会相应减小）
         daily_pnl = net_pnl.sum(dim=0) / (position.sum(dim=0).clamp(min=1))
 
-        # ---- Fitness 计算（分层设计：方向性 → 风险调整 → 预测能力）----
+        # ---- Fitness 计算：Sharpe + IC - 回撤惩罚 ----
         cum_ret = daily_pnl.sum()
         mean_ret = daily_pnl.mean()
 
@@ -113,36 +100,25 @@ class AshareBacktest:
         if active_days < 10:
             return torch.tensor(-10.0, device=factors.device), 0.0
 
-        # === 第一层：方向性得分（用 Sharpe 替代 cum_ret，区分度更高）===
+        # Sharpe（方向性 + 风险调整合一）
         daily_std = daily_pnl.std() + 1e-6
         sharpe = mean_ret / daily_std
-        direction_score = torch.tanh(sharpe * 2.0)
+        sharpe_score = torch.tanh(sharpe * 2.0)
 
-        # === 第二层：风险调整得分 ===
-        # Sortino（正时放大，负时缩小惩罚，避免负 Sortino 主导梯度）
-        downside_sq = torch.relu(-daily_pnl).pow(2)
-        downside_std = torch.sqrt(downside_sq.mean() + 1e-12)
-        if downside_std < 1e-8:
-            downside_std = daily_pnl.std() + 1e-6
-        sortino = mean_ret / (downside_std + 1e-6)
-        # 正 Sortino 给额外奖励，负 Sortino 惩罚但 capped
-        risk_score = torch.tanh(sortino * 0.5)
-
-        # === 第三层：回撤惩罚（连续化，梯度友好）===
+        # 回撤惩罚（连续化，梯度友好）
         cum_curve = torch.cumsum(daily_pnl, dim=0)
         running_max = torch.cummax(cum_curve, dim=0)[0]
         drawdown = cum_curve - running_max
         max_dd = drawdown.min()
         dd_penalty = torch.relu(-max_dd - 0.05) * 2.0
 
-        # === IC 奖励（截面预测能力）===
+        # IC 奖励（截面预测能力）
         ic_bonus = 0.0
-        if N_stocks > 10 and sortino.item() > -2.0:
+        if N_stocks > 10:
             ic_bonus = self._vectorized_ic(factors, target_ret, valid_mask, T_len, N_stocks)
 
-        # 综合得分：方向性 30% + 风险调整 40% + IC 30% - 回撤惩罚
-        fitness = (0.3 * direction_score + 0.4 * risk_score
-                   + 0.3 * ic_bonus - dd_penalty)
+        # 综合得分：Sharpe 60% + IC 40% - 回撤惩罚
+        fitness = 0.6 * sharpe_score + 0.4 * ic_bonus - dd_penalty
 
         return fitness, cum_ret.item()
 
@@ -289,7 +265,7 @@ class AshareBacktest:
             return 0.0
 
         avg_ic = (daily_ic * valid_day.float()).sum() / ic_count
-        return (avg_ic * 5.0).item()
+        return torch.tanh(avg_ic * 10.0).item()
 
     @staticmethod
     def _rolling_mean_1d(x, window):

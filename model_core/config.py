@@ -25,10 +25,8 @@ class ModelConfig:
     MAX_FORMULA_LEN = 10
 
     # ---------- A股交易成本 ----------
-    COMMISSION_RATE = 0.00025      # 佣金万2.5（双向）
-    STAMP_DUTY_RATE = 0.0005       # 印花税千1（仅卖出）
-    TOTAL_BUY_COST = 0.00025       # 买入成本
-    TOTAL_SELL_COST = 0.00025 + 0.0005   # 卖出成本（佣金+印花税）
+    TOTAL_BUY_COST = 0.00025 + 0.001     # 买入成本（佣金万2.5 + 滑点千1）
+    TOTAL_SELL_COST = 0.00025 + 0.0005 + 0.001  # 卖出成本（佣金+印花税千1+滑点千1）
 
     # ---------- A股交易规则 ----------
     PRICE_LIMIT_MAIN = 0.10        # 主板涨跌停 ±10%
