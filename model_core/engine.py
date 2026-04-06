@@ -1,6 +1,7 @@
 import os
 import json
 import torch
+import torch.nn as nn
 import math
 import torch.nn.functional as F
 from torch.distributions import Categorical
@@ -59,6 +60,12 @@ class AlphaEngine:
         self.valid_idx = self.loader.valid_idx
         self.train_idx = self.loader.train_idx
         self.test_idx = self.loader.test_idx
+
+        # 预计算 arity 张量，供 rollout 和 _evaluate_sequences 共用
+        feat_count = len(self.model.features_list)
+        self.arity_tens = torch.zeros(self.model.vocab_size, dtype=torch.long, device=ModelConfig.DEVICE)
+        for i, cfg in enumerate(OPS_CONFIG):
+            self.arity_tens[feat_count + i] = cfg[2]
 
         self.best_score = -float("inf")
         self.best_formula = None
@@ -143,6 +150,40 @@ class AlphaEngine:
                 return i + 1
         return len(tokens)
 
+    def _evaluate_sequences(self, seqs, max_len):
+        """Teacher-forcing: 用当前模型重新评估序列的 log_probs, values, entropy。"""
+        B, T = seqs.shape
+        feat_count = len(self.model.features_list)
+        open_slots = torch.ones(B, dtype=torch.long, device=ModelConfig.DEVICE)
+        curr_inp = torch.zeros(B, 1, dtype=torch.long, device=ModelConfig.DEVICE)
+
+        log_probs, values, entropies = [], [], []
+
+        for t in range(T):
+            logits, val, _ = self.model(curr_inp)
+            mask = self._get_strict_mask(open_slots, t, max_len)
+            dist = Categorical(logits=(logits + mask))
+            action = seqs[:, t]
+
+            log_probs.append(dist.log_prob(action))
+            values.append(val)
+            entropies.append(dist.entropy())
+
+            curr_inp = torch.cat([curr_inp, action.unsqueeze(1)], dim=1)
+
+            is_op = action >= feat_count
+            op_delta = self.arity_tens[action] - 1
+            feat_delta = torch.full_like(action, -1)
+            delta = torch.where(is_op, op_delta, feat_delta)
+            delta[open_slots == 0] = 0
+            open_slots += delta
+
+        return (
+            torch.stack(log_probs, 1).sum(1),           # [B] total_log_prob
+            torch.stack(values, 1).squeeze(-1).mean(1),  # [B] mean_value
+            torch.stack(entropies, 1).sum(1),            # [B] total_entropy
+        )
+
     def train(self):
         lord_info = " (LoRD)" if self.use_lord else ""
         sft_info = f" (SFT {self.sft_steps} steps)" if self.seed_formulas else ""
@@ -155,13 +196,10 @@ class AlphaEngine:
 
         pbar = tqdm(range(ModelConfig.TRAIN_STEPS))
 
-        # 预计算 arity 张量，用于向量化 open_slots 更新
+        # arity_map 用于公式去重
         feat_count = len(self.model.features_list)
-        vocab_size = self.model.vocab_size
-        arity_tens = torch.zeros(vocab_size, dtype=torch.long, device=ModelConfig.DEVICE)
         arity_map = {}
         for i, cfg in enumerate(OPS_CONFIG):
-            arity_tens[feat_count + i] = cfg[2]
             arity_map[feat_count + i] = cfg[2]
 
         prev_max_len = None
@@ -174,34 +212,26 @@ class AlphaEngine:
             prev_max_len = current_max_len
 
             bs = ModelConfig.BATCH_SIZE
-            inp = torch.zeros((bs, 1), dtype=torch.long, device=ModelConfig.DEVICE)
-            open_slots = torch.ones(bs, dtype=torch.long, device=ModelConfig.DEVICE)
 
-            log_probs = []
-            entropies = []
-            values = []
-            tokens_list = []
-            open_slots_history = []
-            for t in range(current_max_len):
-                logits, val, _ = self.model(inp)
-                mask = self._get_strict_mask(open_slots, t, current_max_len)
-                dist = Categorical(logits=(logits + mask))
-                action = dist.sample()
+            # --- Phase 1: Rollout (no grad) ---
+            with torch.no_grad():
+                inp = torch.zeros((bs, 1), dtype=torch.long, device=ModelConfig.DEVICE)
+                open_slots = torch.ones(bs, dtype=torch.long, device=ModelConfig.DEVICE)
+                tokens_list = []
+                for t in range(current_max_len):
+                    logits, _, _ = self.model(inp)
+                    mask = self._get_strict_mask(open_slots, t, current_max_len)
+                    dist = Categorical(logits=(logits + mask))
+                    action = dist.sample()
+                    tokens_list.append(action)
+                    inp = torch.cat([inp, action.unsqueeze(1)], dim=1)
 
-                log_probs.append(dist.log_prob(action))
-                entropies.append(dist.entropy())
-                values.append(val)
-                tokens_list.append(action)
-                inp = torch.cat([inp, action.unsqueeze(1)], dim=1)
-
-                # 更新 open_slots
-                is_op = action >= feat_count
-                op_delta = arity_tens[action] - 1
-                feat_delta = torch.full_like(action, -1)
-                delta = torch.where(is_op, op_delta, feat_delta)
-                delta[open_slots == 0] = 0
-                open_slots += delta
-                open_slots_history.append(open_slots.clone())
+                    is_op = action >= feat_count
+                    op_delta = self.arity_tens[action] - 1
+                    feat_delta = torch.full_like(action, -1)
+                    delta = torch.where(is_op, op_delta, feat_delta)
+                    delta[open_slots == 0] = 0
+                    open_slots += delta
 
             seqs = torch.stack(tokens_list, dim=1)
 
@@ -265,61 +295,62 @@ class AlphaEngine:
 
             unique_ratio = len(unique_map) / bs
 
-            # ---- Advantage 计算：top-k 筛选 + 归一化 ----
-            # 训练进度（供 entropy 退火共用）
+            # ---- Phase 2: Old policy log_probs ----
+            with torch.no_grad():
+                old_log_probs, old_values, _ = self._evaluate_sequences(seqs, current_max_len)
+
+            # ---- Phase 3: Advantage (top-k + critic baseline) ----
             progress = step / max(ModelConfig.TRAIN_STEPS - 1, 1)
-            # Raw score 归一化
             rew_std = rewards.std() + 1e-6
             raw_normalized = (rewards - rewards.mean()) / rew_std
             raw_normalized = raw_normalized.clamp(-2, 2)
 
-            # Top-k 筛选：动态比例，早期 30%→后期 10%
             topk_ratio = max(0.1, 0.3 - 0.2 * progress)
             k = max(int(bs * topk_ratio), 10)
             sorted_indices = rewards.argsort(descending=True)
 
-            # top-k 内保留归一化分数，非 top-k 置零
             adv = torch.zeros(bs, device=ModelConfig.DEVICE)
             adv[sorted_indices[:k]] = raw_normalized[sorted_indices[:k]]
 
-            # Critic baseline：用 value prediction 减去均值后的优势
-            value_pred = torch.stack(values, 1).squeeze(-1).mean(dim=1)
-            adv = adv - value_pred.detach()  # 用 critic 预测作为 baseline
-            adv = adv - adv.mean()  # 去均值
+            adv = adv - old_values.detach()
+            adv = adv - adv.mean()
 
-            # Per-timestep advantage masking：只对 active steps 应用 advantage
-            open_slots_at_t = torch.stack(open_slots_history, dim=1)  # [bs, MAX_FORMULA_LEN]
-
-            policy_loss = 0
-            entropy = 0
-            for t in range(len(log_probs)):
-                active = (open_slots_at_t[:, t] > 0).float()
-                step_adv = adv * active
-                policy_loss += -log_probs[t] * step_adv
-                entropy += entropies[t].mean()
-            policy_loss = policy_loss.mean()
-
-            # Critic value loss（value_pred 已在上方计算）
-            value_loss = F.mse_loss(value_pred, rewards.detach())
-
-            # Entropy bonus：余弦退火，前期缓慢下降，后期加速衰减
+            # Entropy 系数余弦退火
             entropy_coef = ModelConfig.ENTROPY_COEF_END + 0.5 * (
                 ModelConfig.ENTROPY_COEF_START - ModelConfig.ENTROPY_COEF_END
             ) * (1.0 + math.cos(math.pi * progress))
-            loss = policy_loss + 0.5 * value_loss - entropy_coef * entropy / len(log_probs)
 
-            self.opt.zero_grad()
-            loss.backward()
-            self.opt.step()
+            # ---- Phase 4: PPO Update ----
+            total_loss_val = 0.0
+            for _ in range(ModelConfig.PPO_EPOCHS):
+                new_log_probs, new_values, new_entropy = self._evaluate_sequences(seqs, current_max_len)
 
-            if self.use_lord:
-                self.lord_opt.step()
+                ratio = torch.exp(new_log_probs - old_log_probs)
+                surr1 = ratio * adv
+                surr2 = torch.clamp(ratio, 1 - ModelConfig.PPO_CLIP_EPS,
+                                    1 + ModelConfig.PPO_CLIP_EPS) * adv
+                policy_loss = -torch.min(surr1, surr2).mean()
+
+                value_loss = F.mse_loss(new_values, rewards.detach())
+                entropy_bonus = new_entropy.mean()
+
+                loss = policy_loss + 0.5 * value_loss - entropy_coef * entropy_bonus / current_max_len
+
+                self.opt.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.model.parameters(), ModelConfig.GRAD_CLIP_NORM)
+                self.opt.step()
+
+                if self.use_lord:
+                    self.lord_opt.step()
+
+                total_loss_val += loss.item()
 
             self.scheduler.step()
 
             # 日志
             avg_reward = rewards.mean().item()
-            total_loss_val = loss.item()
+            total_loss_val /= ModelConfig.PPO_EPOCHS
             postfix = {
                 "AvgRew": f"{avg_reward:.3f}",
                 "Best": f"{self.best_score:.3f}",
