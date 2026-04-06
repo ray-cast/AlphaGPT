@@ -20,7 +20,7 @@ class ModelConfig:
     # 验证集：2017-2018（熊市） | 训练集：2019-2023 | 测试集：2024-2026
 
     # ---------- 训练参数 ----------
-    BATCH_SIZE = 2048
+    BATCH_SIZE = 1024
     TRAIN_STEPS = 500
     MAX_FORMULA_LEN = 8             # 限制公式长度，防止过拟合，短小精悍的公式往往更稳
 
@@ -65,7 +65,7 @@ class ModelConfig:
     # 逐步增加公式最大长度，先搜短公式再搜长公式，压缩搜索空间
     # 格式: [(步数阈值, 最大公式长度), ...]，按步数递增排列
     # None = 关闭课程学习，全程使用 MAX_FORMULA_LEN
-    CURRICULUM_SCHEDULE = [(0, 4), (100, 6), (200, 8)]
+    CURRICULUM_SCHEDULE = None  # 关闭课程学习，全程使用 MAX_FORMULA_LEN
 
     # ---------- SFT 热启动 ----------
     SEED_FORMULA_NAMES = [         # 种子公式（名称格式，token ID 动态计算）
@@ -73,4 +73,4 @@ class ModelConfig:
         ("CS_RANK", ["RET"]),                       # 动量截面排名
         ("CROSS", ["P_VALUE", "RET"]),              # 价值×动量交互
     ]
-    SFT_STEPS = 50                 # SFT 预训练步数（0 = 关闭热启动）
+    SFT_STEPS = 0                  # SFT 预训练步数（0 = 关闭热启动）
