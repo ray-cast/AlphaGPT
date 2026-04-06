@@ -181,17 +181,10 @@ class AlphaEngine:
             values = []
             tokens_list = []
             open_slots_history = []
-            warmup_active = step < ModelConfig.WARMUP_STEPS
-
             for t in range(current_max_len):
                 logits, val, _ = self.model(inp)
                 mask = self._get_strict_mask(open_slots, t, current_max_len)
-                if warmup_active:
-                    # Warm-up 阶段：均匀采样（mask 仍生效保证合法性）
-                    uniform_logits = torch.zeros_like(logits)
-                    dist = Categorical(logits=(uniform_logits + mask))
-                else:
-                    dist = Categorical(logits=(logits + mask))
+                dist = Categorical(logits=(logits + mask))
                 action = dist.sample()
 
                 log_probs.append(dist.log_prob(action))
