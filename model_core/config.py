@@ -38,6 +38,7 @@ class ModelConfig:
 
     # ---------- 早停 ----------
     PATIENCE_LIMIT = 25           # 连续 N 步无新 best 则早停
+    MIN_TRAIN_STEPS = 150         # 至少跑 N 步再允许早停（确保课程学习有时间展开）
 
     # ---------- 探索与多样性 ----------
     ENTROPY_COEF_START = 0.20      # 起始 entropy 系数

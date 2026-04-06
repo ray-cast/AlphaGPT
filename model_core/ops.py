@@ -144,6 +144,7 @@ def _op_decay(x: torch.Tensor) -> torch.Tensor:
     return (w0 * x + w1 * _ts_delay(x, 1) + w2 * _ts_delay(x, 2)) / s
 
 OPS_CONFIG = [
+    # ---- 算术算子 ----
     ('ADD', lambda x, y: x + y, 2),
     ('SUB', lambda x, y: x - y, 2),
     ('MUL', lambda x, y: x * y, 2),
@@ -151,20 +152,17 @@ OPS_CONFIG = [
     ('NEG', lambda x: -x, 1),
     ('ABS', torch.abs, 1),
     ('SIGN', torch.sign, 1),
+    # ---- 控制流 ----
     ('GATE', _op_gate, 3),
-    ('JUMP', _op_jump, 1),
-    ('DECAY', _op_decay, 1),
-    # 截面算子：对每个交易日做截面操作（dim=0 = 股票维度）
+    # ---- 截面算子 ----
     ('CS_RANK', _cs_rank, 1),
-    # 截面交互：排名乘积，捕捉多因子协同
     ('CROSS', lambda x, y: _cs_rank(x) * _cs_rank(y), 2),
-    # 时序算子：固定窗口版本（VM 无法传参数，故预定义常用窗口）
+    # ---- 时序算子（精简：移除与 TS_RANK20 重叠的 JUMP、与 TS_MA20 重叠的 DECAY、冗余的 TS_DELAY2）----
     ('TS_RANK20', lambda x: _ts_rank(x, 20), 1),
     ('TS_MA20', lambda x: _ts_decay_linear(x, 20), 1),
     ('TS_DELTA5', lambda x: _ts_delta(x, 5), 1),
     ('TS_MIN5', lambda x: _ts_min(x, 5), 1),
     ('TS_MAX5', lambda x: _ts_max(x, 5), 1),
     ('TS_STD20', lambda x: _ts_std(x, 20), 1),
-    ('TS_DELAY2', lambda x: _ts_delay(x, 2), 1),
     ('TS_CORR20', lambda x, y: _ts_corr(x, y, 20), 2),
 ]

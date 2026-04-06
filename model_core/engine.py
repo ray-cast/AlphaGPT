@@ -266,13 +266,17 @@ class AlphaEngine:
             unique_ratio = len(unique_map) / bs
 
             # ---- Advantage 计算：top-k 加权 + 归一化 raw score ----
+            # 训练进度（供 top-k 动态比例和 entropy 退火共用）
+            progress = step / max(ModelConfig.TRAIN_STEPS - 1, 1)
             # Raw score 归一化（中心化 + 缩放到合理范围）
             rew_std = rewards.std() + 1e-6
             raw_normalized = (rewards - rewards.mean()) / rew_std
             raw_normalized = raw_normalized.clamp(-3, 3)
 
-            # Top-k 加权：只对 top 10% 给正 advantage，强化学习信号
-            k = max(int(bs * 0.1), 10)
+            # Top-k 加权：动态比例，早期 30%→后期 10%，渐进收窄
+            # 早期需要更大覆盖面建立探索方向，后期收窄来精调
+            topk_ratio = max(0.1, 0.3 - 0.2 * progress)
+            k = max(int(bs * topk_ratio), 10)
             sorted_indices = rewards.argsort(descending=True)
             topk_mask = torch.zeros(bs, device=ModelConfig.DEVICE)
             topk_mask[sorted_indices[:k]] = 1.0
@@ -286,7 +290,7 @@ class AlphaEngine:
             # 非 top-k 公式用 raw_normalized（已经是负值为主）
             adv = adv * topk_mask + (raw_normalized / 3.0) * (1 - topk_mask)
 
-            # 多样性惩罚：使用已缓存的 formula_keys
+            # 多样性：重复惩罚 + 结构多样性奖励
             diversity_bonus = torch.zeros(bs, device=ModelConfig.DEVICE)
             if unique_ratio < ModelConfig.DIVERSITY_TARGET:
                 formula_counts = {}
@@ -297,6 +301,24 @@ class AlphaEngine:
                     count = formula_counts[formula_keys[i]]
                     if count > 1:
                         diversity_bonus[i] = -ModelConfig.DIVERSITY_PENALTY * (count / bs)
+
+            # 结构多样性奖励：使用多种类型算子（截面/时序）的公式加分
+            # 鼓励模型探索不同模式，避免坍缩到纯时序或纯算术
+            cs_op_ids = set()   # 截面算子 token IDs
+            ts_op_ids = set()   # 时序算子 token IDs
+            for i, cfg in enumerate(OPS_CONFIG):
+                token_id = feat_count + i
+                if cfg[0] in ('CS_RANK', 'CROSS'):
+                    cs_op_ids.add(token_id)
+                elif cfg[0].startswith('TS_'):
+                    ts_op_ids.add(token_id)
+            for i in range(bs):
+                used_tokens = set(formula_keys[i])
+                used_cs = len(used_tokens & cs_op_ids)
+                used_ts = len(used_tokens & ts_op_ids)
+                # 用了截面+时序各至少一种 → 额外奖励
+                if used_cs > 0 and used_ts > 0:
+                    diversity_bonus[i] += 0.3
 
             adv = adv + diversity_bonus
 
@@ -320,9 +342,7 @@ class AlphaEngine:
             # Critic value loss（value_pred 已在上方计算）
             value_loss = F.mse_loss(value_pred, rewards.detach())
 
-            # Entropy bonus：线性退火，去掉 / bs 使 entropy 系数真正有效
-            # 余弦退火：前期缓慢下降，后期加速衰减
-            progress = step / max(ModelConfig.TRAIN_STEPS - 1, 1)
+            # Entropy bonus：余弦退火，前期缓慢下降，后期加速衰减
             entropy_coef = ModelConfig.ENTROPY_COEF_END + 0.5 * (
                 ModelConfig.ENTROPY_COEF_START - ModelConfig.ENTROPY_COEF_END
             ) * (1.0 + math.cos(math.pi * progress))
@@ -363,9 +383,9 @@ class AlphaEngine:
             with open("training_history.json", "w") as f:
                 json.dump(self.training_history, f, ensure_ascii=False, indent=2)
 
-            # 早停检查
+            # 早停检查（确保课程学习有时间展开）
             self.patience_counter += 1
-            if self.patience_counter >= self.patience_limit:
+            if self.patience_counter >= self.patience_limit and step >= ModelConfig.MIN_TRAIN_STEPS:
                 print(f"\n早停：连续 {self.patience_limit} 步无新最优，终止训练")
                 break
 

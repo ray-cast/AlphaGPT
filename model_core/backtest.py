@@ -116,8 +116,10 @@ class AshareBacktest:
         if active_days < 10:
             return torch.tensor(-10.0, device=factors.device), 0.0
 
-        # === 第一层：方向性得分（连续可微，正收益有正分）===
-        direction_score = torch.tanh(cum_ret * 5.0)
+        # === 第一层：方向性得分（用 Sharpe 替代 cum_ret，区分度更高）===
+        daily_std = daily_pnl.std() + 1e-6
+        sharpe = mean_ret / daily_std
+        direction_score = torch.tanh(sharpe * 2.0)
 
         # === 第二层：风险调整得分 ===
         # Sortino（正时放大，负时缩小惩罚，避免负 Sortino 主导梯度）
@@ -145,9 +147,10 @@ class AshareBacktest:
         if N_stocks > 10 and sortino.item() > -2.0:
             ic_bonus = self._vectorized_ic(factors, target_ret, valid_mask, T_len, N_stocks)
 
-        # 综合得分：方向性 40% + 风险调整 30% + IC 30% - 惩罚项
-        fitness = (0.4 * direction_score + 0.3 * risk_score
-                   + 0.3 * ic_bonus - dd_penalty - turnover_penalty)
+        # 综合得分：方向性 20% + 风险调整 30% + IC 50% - 惩罚项
+        # IC 权重最高：截面选股能力是最核心的信号
+        fitness = (0.2 * direction_score + 0.3 * risk_score
+                   + 0.5 * ic_bonus - dd_penalty - turnover_penalty)
 
         return fitness, cum_ret.item()
 
