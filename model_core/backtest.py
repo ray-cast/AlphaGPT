@@ -17,6 +17,7 @@ class AshareBacktest:
         self.min_turnover = ModelConfig.MIN_TURNOVER_RATE
         self.top_n = ModelConfig.TOP_N_STOCKS
         self.rebalance_freq = ModelConfig.REBALANCE_FREQ
+        self.avg_cost = (self.buy_cost + self.sell_cost) / 2.0
 
     def evaluate(self, factors, raw_data, target_ret, start_idx=0, end_idx=None):
         """
@@ -51,16 +52,14 @@ class AshareBacktest:
 
         # 排除停牌/非成分股（NaN 信号、NaN target_ret、停牌、或非时点成分股）
         valid_mask = ~(torch.isnan(factors) | torch.isnan(target_ret) | suspended) & constituent
-        scores = factors.clone()
-        scores[~valid_mask] = float('-inf')
-        scores[turnover_rate <= self.min_turnover] = float('-inf')
+        tradeable = valid_mask & (turnover_rate > self.min_turnover)
+        scores = torch.where(tradeable, factors, torch.tensor(float('-inf'), device=factors.device))
 
         # 基本面过滤（训练用 soft penalty，保留探索空间）
         apply_fundamental_filter(scores, pe_ttm, roe, soft=True)
 
         # 市场状态判断：等权组合收益的 20 日均线（排除停牌）
-        valid_target = target_ret.clone()
-        valid_target[~valid_mask] = 0.0
+        valid_target = torch.where(valid_mask, target_ret, 0.0)
         valid_count = valid_mask.float().sum(dim=0).clamp(min=1)
         market_daily_ret = valid_target.sum(dim=0) / valid_count
         market_ma20 = self._rolling_mean_1d(market_daily_ret, 20)
@@ -81,8 +80,7 @@ class AshareBacktest:
         turnover = torch.abs(position - prev_pos)
 
         # 交易成本
-        avg_cost = (self.buy_cost + self.sell_cost) / 2.0
-        tx_cost = turnover * avg_cost
+        tx_cost = turnover * self.avg_cost
 
         # PnL：应用估值感知的缩减系数（不产生虚假换手成本）
         gross_pnl = position * target_ret * stock_scale
@@ -242,19 +240,13 @@ class AshareBacktest:
         # 每日有效股票数
         n_valid = valid_mask.float().sum(dim=0).clamp(min=1)  # [T_len]
 
-        # 将 invalid 位置置零
-        f_c = factors.clone()
-        r_c = target_ret.clone()
-        f_c[~valid_mask] = 0.0
-        r_c[~valid_mask] = 0.0
-
-        # 中心化（只对 valid 位置）
+        # 将 invalid 位置置零并中心化（只对 valid 位置）
+        f_c = torch.where(valid_mask, factors, 0.0)
+        r_c = torch.where(valid_mask, target_ret, 0.0)
         f_mean = f_c.sum(dim=0) / n_valid
         r_mean = r_c.sum(dim=0) / n_valid
-        f_c -= f_mean.unsqueeze(0)
-        r_c -= r_mean.unsqueeze(0)
-        f_c[~valid_mask] = 0.0
-        r_c[~valid_mask] = 0.0
+        f_c = torch.where(valid_mask, f_c - f_mean.unsqueeze(0), 0.0)
+        r_c = torch.where(valid_mask, r_c - r_mean.unsqueeze(0), 0.0)
 
         # 逐日 Pearson 相关系数
         cov = (f_c * r_c).sum(dim=0)
