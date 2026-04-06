@@ -107,51 +107,47 @@ class AshareBacktest:
         # 每天 portfolio 收益（按实际持仓权重归一化，熊市减仓时分母会相应减小）
         daily_pnl = net_pnl.sum(dim=0) / (position.sum(dim=0).clamp(min=1))
 
-        # ---- Fitness 计算 ----
-        # 1) Sortino 比率作为主指标
+        # ---- Fitness 计算（分层设计：方向性 → 风险调整 → 预测能力）----
+        cum_ret = daily_pnl.sum()
         mean_ret = daily_pnl.mean()
-        # 真正的下行标准差：sqrt(mean(min(R-target, 0)^2))，target=0
+
+        # 活跃度不足惩罚（硬性门槛，提前返回）
+        active_days = (position.sum(dim=0) > 0).float().sum()
+        if active_days < 10:
+            return torch.tensor(-10.0, device=factors.device), 0.0
+
+        # === 第一层：方向性得分（连续可微，正收益有正分）===
+        direction_score = torch.tanh(cum_ret * 5.0)
+
+        # === 第二层：风险调整得分 ===
+        # Sortino（正时放大，负时缩小惩罚，避免负 Sortino 主导梯度）
         downside_sq = torch.relu(-daily_pnl).pow(2)
         downside_std = torch.sqrt(downside_sq.mean() + 1e-12)
         if downside_std < 1e-8:
             downside_std = daily_pnl.std() + 1e-6
-
         sortino = mean_ret / (downside_std + 1e-6)
+        # 正 Sortino 给额外奖励，负 Sortino 惩罚但 capped
+        risk_score = torch.tanh(sortino * 0.5)
 
-        # 2) 惩罚项
-        cum_ret = daily_pnl.sum()
-
-        # 最大回撤惩罚
+        # === 第三层：回撤惩罚（连续化，梯度友好）===
         cum_curve = torch.cumsum(daily_pnl, dim=0)
         running_max = torch.cummax(cum_curve, dim=0)[0]
         drawdown = cum_curve - running_max
         max_dd = drawdown.min()
         dd_penalty = torch.relu(-max_dd - 0.05) * 2.0
 
-        # 换手率惩罚
+        # === 换手率惩罚（连续化替代硬阈值）===
         avg_turnover = turnover.mean()
-        turnover_penalty = 0.0
-        if avg_turnover > 0.5:
-            turnover_penalty = 1.0
+        turnover_penalty = torch.relu(avg_turnover - 0.3) * 3.0
 
-        # 活跃度不足惩罚
-        active_days = (position.sum(dim=0) > 0).float().sum()
-        if active_days < 10:
-            return torch.tensor(-10.0, device=factors.device), 0.0
-
-        # 负收益惩罚
-        neg_return_penalty = 0.0
-        if cum_ret < 0:
-            neg_return_penalty = min(abs(cum_ret) * 2.0, 1.0)
-
-        # IC 奖励：向量化 Spearman 秩相关（截面预测能力）
-        # 仅当 Sortino > -2 时计算 IC，避免对差公式浪费计算
+        # === IC 奖励（截面预测能力）===
         ic_bonus = 0.0
         if N_stocks > 10 and sortino.item() > -2.0:
             ic_bonus = self._vectorized_ic(factors, target_ret, valid_mask, T_len, N_stocks)
 
-        # 综合得分
-        fitness = sortino - dd_penalty - turnover_penalty - neg_return_penalty + ic_bonus
+        # 综合得分：方向性 40% + 风险调整 30% + IC 30% - 惩罚项
+        fitness = (0.4 * direction_score + 0.3 * risk_score
+                   + 0.3 * ic_bonus - dd_penalty - turnover_penalty)
 
         return fitness, cum_ret.item()
 

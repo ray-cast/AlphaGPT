@@ -1,6 +1,7 @@
 import os
 import json
 import torch
+import math
 import torch.nn.functional as F
 from torch.distributions import Categorical
 from tqdm import tqdm
@@ -264,16 +265,26 @@ class AlphaEngine:
 
             unique_ratio = len(unique_map) / bs
 
-            # 混合奖励：rank + 归一化 raw score，避免公式同质化时梯度消失
-            rank_indices = rewards.argsort().argsort().float()
-            rank_normalized = rank_indices / (bs - 1) * 2 - 1  # 映射到 [-1, 1]
-
-            # Raw score 归一化到 [-1, 1]
+            # ---- Advantage 计算：top-k 加权 + 归一化 raw score ----
+            # Raw score 归一化（中心化 + 缩放到合理范围）
             rew_std = rewards.std() + 1e-6
             raw_normalized = (rewards - rewards.mean()) / rew_std
-            raw_normalized = raw_normalized.clamp(-1, 1)
+            raw_normalized = raw_normalized.clamp(-3, 3)
 
-            adv = 0.7 * rank_normalized + 0.3 * raw_normalized
+            # Top-k 加权：只对 top 10% 给正 advantage，强化学习信号
+            k = max(int(bs * 0.1), 10)
+            sorted_indices = rewards.argsort(descending=True)
+            topk_mask = torch.zeros(bs, device=ModelConfig.DEVICE)
+            topk_mask[sorted_indices[:k]] = 1.0
+            # top-k 内部也保留排名梯度（排在前面给更高权重）
+            topk_ranks = torch.zeros(bs, device=ModelConfig.DEVICE)
+            for rank_pos, idx in enumerate(sorted_indices[:k]):
+                topk_ranks[idx] = (k - rank_pos) / k  # 线性衰减：第1名=1.0，第k名≈0
+
+            # 混合：top-k 权重 60% + raw 归一化 40%
+            adv = 0.6 * topk_ranks + 0.4 * (raw_normalized / 3.0)
+            # 非 top-k 公式用 raw_normalized（已经是负值为主）
+            adv = adv * topk_mask + (raw_normalized / 3.0) * (1 - topk_mask)
 
             # 多样性惩罚：使用已缓存的 formula_keys
             diversity_bonus = torch.zeros(bs, device=ModelConfig.DEVICE)
@@ -310,8 +321,11 @@ class AlphaEngine:
             value_loss = F.mse_loss(value_pred, rewards.detach())
 
             # Entropy bonus：线性退火，去掉 / bs 使 entropy 系数真正有效
+            # 余弦退火：前期缓慢下降，后期加速衰减
             progress = step / max(ModelConfig.TRAIN_STEPS - 1, 1)
-            entropy_coef = ModelConfig.ENTROPY_COEF_START * (1.0 - progress) + ModelConfig.ENTROPY_COEF_END * progress
+            entropy_coef = ModelConfig.ENTROPY_COEF_END + 0.5 * (
+                ModelConfig.ENTROPY_COEF_START - ModelConfig.ENTROPY_COEF_END
+            ) * (1.0 + math.cos(math.pi * progress))
             loss = policy_loss + 0.5 * value_loss - entropy_coef * entropy / len(log_probs)
 
             self.opt.zero_grad()

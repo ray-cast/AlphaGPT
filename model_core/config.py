@@ -37,7 +37,7 @@ class ModelConfig:
     MIN_TURNOVER_RATE = 0.005      # 最低换手率（过滤停牌/流动性不足）
 
     # ---------- 早停 ----------
-    PATIENCE_LIMIT = 50           # 连续 N 步无新 best 则早停
+    PATIENCE_LIMIT = 25           # 连续 N 步无新 best 则早停
 
     # ---------- 探索与多样性 ----------
     ENTROPY_COEF_START = 0.20      # 起始 entropy 系数
@@ -69,7 +69,7 @@ class ModelConfig:
     # 逐步增加公式最大长度，先搜短公式再搜长公式，压缩搜索空间
     # 格式: [(步数阈值, 最大公式长度), ...]，按步数递增排列
     # None = 关闭课程学习，全程使用 MAX_FORMULA_LEN
-    CURRICULUM_SCHEDULE = [(0, 4), (100, 6), (200, 8), (350, 10)]
+    CURRICULUM_SCHEDULE = [(0, 6), (80, 8), (200, 10)]
 
     # ---------- SFT 热启动 ----------
     SEED_FORMULA_NAMES = [         # 种子公式（名称格式，token ID 动态计算）
