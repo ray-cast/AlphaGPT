@@ -31,41 +31,23 @@ def _ts_rank(x: torch.Tensor, d: int) -> torch.Tensor:
     return rank / (d - 1)
 
 
-def _ts_min(x: torch.Tensor, d: int) -> torch.Tensor:
-    """时序滚动最小值。"""
-    if d <= 1: return x
-    B, T = x.shape
-    pad = torch.full((B, d - 1), float('inf'), device=x.device)
-    x_pad = torch.cat([pad, x], dim=1)
-    windows = x_pad.unfold(1, d, 1)
-    return windows.min(dim=-1)[0]
-
-
-def _ts_max(x: torch.Tensor, d: int) -> torch.Tensor:
-    """时序滚动最大值。"""
-    if d <= 1: return x
-    B, T = x.shape
-    pad = torch.full((B, d - 1), float('-inf'), device=x.device)
-    x_pad = torch.cat([pad, x], dim=1)
-    windows = x_pad.unfold(1, d, 1)
-    return windows.max(dim=-1)[0]
-
-
-def _ts_std(x: torch.Tensor, d: int) -> torch.Tensor:
-    """时序滚动标准差。使用 cumsum 公式避免 unfold 开销。"""
+def _ts_zscore(x: torch.Tensor, d: int) -> torch.Tensor:
+    """时序滚动 z-score：(x - rolling_mean) / rolling_std，输出有正有负可直接做方向信号。"""
     if d <= 1: return torch.zeros_like(x)
     B, T = x.shape
-    # cumsum 公式: Var(X) = E[X^2] - E[X]^2
     x2 = x * x
     pad = torch.zeros((B, d - 1), device=x.device, dtype=x.dtype)
     cs = torch.cumsum(torch.cat([pad, x], dim=1), dim=1)
     cs2 = torch.cumsum(torch.cat([pad, x2], dim=1), dim=1)
-    # 滚动求和
     roll_sum = cs[:, d:] - cs[:, :-d]
     roll_sum2 = cs2[:, d:] - cs2[:, :-d]
     mean = roll_sum / d
     var = roll_sum2 / d - mean * mean
-    return torch.sqrt(var.clamp(min=1e-12))
+    std = torch.sqrt(var.clamp(min=1e-12))
+    # 前 d-1 位没有完整窗口，用恒零填充
+    z = torch.zeros_like(x)
+    z[:, d - 1:] = (x[:, d - 1:] - mean) / std
+    return z
 
 
 def _ts_corr(x: torch.Tensor, y: torch.Tensor, d: int) -> torch.Tensor:
@@ -104,11 +86,6 @@ def _ts_delay(x: torch.Tensor, d: int) -> torch.Tensor:
     if d == 0: return x
     pad = torch.zeros((x.shape[0], d), device=x.device)
     return torch.cat([pad, x[:, :-d]], dim=1)
-
-@torch.jit.script
-def _op_gate(condition: torch.Tensor, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    mask = (condition > 0).float()
-    return mask * x + (1.0 - mask) * y
 
 @torch.jit.script
 def _op_jump(x: torch.Tensor) -> torch.Tensor:
@@ -152,17 +129,12 @@ OPS_CONFIG = [
     ('NEG', lambda x: -x, 1),
     ('ABS', torch.abs, 1),
     ('SIGN', torch.sign, 1),
-    # ---- 控制流 ----
-    ('GATE', _op_gate, 3),
     # ---- 截面算子 ----
     ('CS_RANK', _cs_rank, 1),
-    ('CROSS', lambda x, y: _cs_rank(x) * _cs_rank(y), 2),
-    # ---- 时序算子（精简：移除与 TS_RANK20 重叠的 JUMP、与 TS_MA20 重叠的 DECAY、冗余的 TS_DELAY2）----
+    # ---- 时序算子 ----
     ('TS_RANK20', lambda x: _ts_rank(x, 20), 1),
     ('TS_MA20', lambda x: _ts_decay_linear(x, 20), 1),
     ('TS_DELTA5', lambda x: _ts_delta(x, 5), 1),
-    ('TS_MIN5', lambda x: _ts_min(x, 5), 1),
-    ('TS_MAX5', lambda x: _ts_max(x, 5), 1),
-    ('TS_STD20', lambda x: _ts_std(x, 20), 1),
+    ('TS_ZSCORE20', lambda x: _ts_zscore(x, 20), 1),
     ('TS_CORR20', lambda x, y: _ts_corr(x, y, 20), 2),
 ]
