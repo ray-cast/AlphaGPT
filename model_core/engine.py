@@ -220,7 +220,10 @@ class AlphaEngine:
                     rewards[i] = score
                     continue
 
-                res = self.vm.execute(trimmed, self.loader.feat_tensor)
+                res = self.vm.execute(
+                    trimmed, self.loader.feat_tensor,
+                    nan_mask=self.loader.nan_mask,
+                    clean_feat=self.loader.clean_feat_tensor)
 
                 if res is None:
                     unique_map[fkey] = (-5.0, 0.0)
@@ -461,7 +464,9 @@ class AlphaEngine:
 
         writer = SignalWriter(self.loader)
         alpha_values = self.vm.execute(
-            self.best_formula, self.loader.feat_tensor
+            self.best_formula, self.loader.feat_tensor,
+            nan_mask=self.loader.nan_mask,
+            clean_feat=self.loader.clean_feat_tensor
         )
         if alpha_values is None:
             print("最佳公式执行失败")

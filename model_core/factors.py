@@ -40,6 +40,80 @@ def _rolling_mean(x, window):
     result = torch.cat([expanding_mean[:, :window - 1], rolling_mean], dim=1)
     return result
 
+class Indicators:
+    @staticmethod
+    def liquidity_health(liquidity, fdv):
+        ratio = liquidity / (fdv + 1e-6)
+        return torch.clamp(ratio * 4.0, 0.0, 1.0)
+
+    @staticmethod
+    def buy_sell_imbalance(close, open_, high, low):
+        range_hl = high - low + 1e-9
+        body = close - open_
+        strength = body / range_hl
+        return torch.tanh(strength * 3.0)
+
+    @staticmethod
+    def fomo_acceleration(volume, window=5):
+        vol_prev = torch.roll(volume, 1, dims=1)
+        vol_chg = (volume - vol_prev) / (vol_prev + 1.0)
+        acc = vol_chg - torch.roll(vol_chg, 1, dims=1)
+        return torch.clamp(acc, -5.0, 5.0)
+
+    @staticmethod
+    def pump_deviation(close, window=20):
+        pad = torch.zeros((close.shape[0], window-1), device=close.device)
+        c_pad = torch.cat([pad, close], dim=1)
+        ma = c_pad.unfold(1, window, 1).mean(dim=-1)
+        dev = (close - ma) / (ma + 1e-9)
+        return dev
+
+    @staticmethod
+    def volatility_clustering(close, window=10):
+        """Detect volatility clustering patterns"""
+        ret = torch.log(close / (torch.roll(close, 1, dims=1) + 1e-9))
+        ret_sq = ret ** 2
+        
+        pad = torch.zeros((ret_sq.shape[0], window-1), device=close.device)
+        ret_sq_pad = torch.cat([pad, ret_sq], dim=1)
+        vol_ma = ret_sq_pad.unfold(1, window, 1).mean(dim=-1)
+        
+        return torch.sqrt(vol_ma + 1e-9)
+
+    @staticmethod
+    def momentum_reversal(close, window=5):
+        """Capture momentum reversal signals"""
+        ret = torch.log(close / (torch.roll(close, 1, dims=1) + 1e-9))
+        
+        pad = torch.zeros((ret.shape[0], window-1), device=close.device)
+        ret_pad = torch.cat([pad, ret], dim=1)
+        mom = ret_pad.unfold(1, window, 1).sum(dim=-1)
+        
+        # Detect reversals
+        mom_prev = torch.roll(mom, 1, dims=1)
+        reversal = (mom * mom_prev < 0).float()
+        
+        return reversal
+
+    @staticmethod
+    def relative_strength(close, high, low, window=14):
+        """RSI-like indicator for strength detection"""
+        ret = close - torch.roll(close, 1, dims=1)
+        
+        gains = torch.relu(ret)
+        losses = torch.relu(-ret)
+        
+        pad = torch.zeros((gains.shape[0], window-1), device=close.device)
+        gains_pad = torch.cat([pad, gains], dim=1)
+        losses_pad = torch.cat([pad, losses], dim=1)
+        
+        avg_gain = gains_pad.unfold(1, window, 1).mean(dim=-1)
+        avg_loss = losses_pad.unfold(1, window, 1).mean(dim=-1)
+        
+        rs = (avg_gain + 1e-9) / (avg_loss + 1e-9)
+        rsi = 100 - (100 / (1 + rs))
+        
+        return (rsi - 50) / 50  # Normalize
 
 class FeatureEngineer:
     INPUT_DIM = 15
@@ -82,25 +156,13 @@ class FeatureEngineer:
         turn_normed = robust_norm(turn)
 
         # ---- 因子 5: 买卖压力（K线实体/振幅） ----
-        range_hl = h - l + 1e-9
-        body = c - o
-        pressure = torch.tanh((body / range_hl) * 3.0)
+        pressure = Indicators.buy_sell_imbalance(c, o, h, l)
 
         # ---- 因子 6: 偏离 20日均线 ----
-        ma20 = _rolling_mean(c, 20)
-        dev = (c - ma20) / (ma20 + 1e-9)
+        dev = Indicators.pump_deviation(c, 20)
 
         # ---- 因子 7: 相对强弱 RSI-like ----
-        delta = c - torch.roll(c, 1, dims=1)
-        delta[:, 0] = 0.0
-        gains = torch.relu(delta)
-        losses = torch.relu(-delta)
-        window = 14
-        avg_gain = _rolling_mean(gains, window)
-        avg_loss = _rolling_mean(losses, window)
-        rs = (avg_gain + 1e-9) / (avg_loss + 1e-9)
-        rsi = 100.0 - (100.0 / (1.0 + rs))
-        rel_strength = (rsi - 50.0) / 50.0  # 归一化到 [-1, 1]
+        rel_strength = Indicators.relative_strength(c, h, l, 14)
 
         # ---- 因子 8: 价格 vs 60日均线（趋势） ----
         ma60 = _rolling_mean(c, 60)
@@ -124,7 +186,7 @@ class FeatureEngineer:
         close_pos = (c - l) / (h - l + 1e-9)
 
         # ---- 因子 13: 已实现波动率（REALIZED_VOL） ----
-        realized_vol = torch.sqrt(vol_long + 1e-9)
+        realized_vol = Indicators.volatility_clustering(c, 20)
 
         # ---- 因子 14: 价值锚 P_value (EPS_TTM × ROE × 100) ----
         # 源自 Lethon 大盘鸡策略的估值核心：盈利 × 资本回报 → 内在价值

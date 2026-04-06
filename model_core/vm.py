@@ -7,35 +7,18 @@ class PrefixVM:
         self.feat_offset = FeatureEngineer.INPUT_DIM
         self.op_map = {i + self.feat_offset: cfg[1] for i, cfg in enumerate(OPS_CONFIG)}
         self.arity_map = {i + self.feat_offset: cfg[2] for i, cfg in enumerate(OPS_CONFIG)}
-        self._nan_mask_cache = None
-        self._clean_feat_cache = None
-        self._cache_key = None
 
-    def _prepare_tensors(self, feat_tensor):
-        """预计算 NaN mask 和清理版 feat_tensor，避免逐算子 NaN 处理。"""
-        key = feat_tensor.data_ptr()
-        if self._cache_key == key:
-            return self._nan_mask_cache, self._clean_feat_cache
-        # 任意 feature 中有 NaN 的位置（停牌股票）
-        self._nan_mask_cache = torch.isnan(feat_tensor).any(dim=1)
-        # NaN 替换为 0 的干净版本
-        self._clean_feat_cache = feat_tensor.nan_to_num(nan=0.0)
-        self._cache_key = key
-        return self._nan_mask_cache, self._clean_feat_cache
-
-    def execute(self, formula_tokens, feat_tensor):
+    def execute(self, formula_tokens, feat_tensor, nan_mask=None, clean_feat=None):
         """递归下降求值前缀表达式。
-        前缀 RANK(DELTA5(RET)) = [RANK, DELTA5, RET]
-          → 读 RANK(arity=1)，递归求1个参数
-            → 读 DELTA5(arity=1)，递归求1个参数
-              → 读 RET(特征)，返回数据
-            → 对结果施加 DELTA5
-          → 对结果施加 RANK
 
-        优化：预清理 feat_tensor 中的 NaN，执行完后统一恢复停牌标记，
-        避免每个算子都做 NaN 检测和恢复。
+        优化：nan_mask 和 clean_feat 由 data_loader 预计算，训练期间零开销。
+        若未传入（generate_signals 等离线场景），回退到实时计算。
         """
-        nan_mask, clean_feat = self._prepare_tensors(feat_tensor)
+        # 使用预计算版本或回退到实时计算
+        if nan_mask is None:
+            nan_mask = torch.isnan(feat_tensor).any(dim=1)
+            clean_feat = feat_tensor.nan_to_num(nan=0.0)
+
         pos = [0]
 
         def eval_prefix():

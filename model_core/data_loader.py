@@ -166,6 +166,10 @@ class AshareDataLoader:
         # 5. 计算因子
         self.feat_tensor = FeatureEngineer.compute_features(self.raw_data_cache)
 
+        # 5.1 预计算 NaN mask 和清洗版 feat（训练期间不变，避免 VM 逐次计算）
+        self.nan_mask = torch.isnan(self.feat_tensor).any(dim=1)   # [N, T] bool
+        self.clean_feat_tensor = self.feat_tensor.nan_to_num(nan=0.0)  # NaN→0
+
         # 6. 计算 target_ret（open-to-open，T+1 合规）
         op = self.raw_data_cache["open"]
         suspended = self.raw_data_cache["suspended"]  # [N, T] 停牌掩码（ffill 前记录）

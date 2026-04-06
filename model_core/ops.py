@@ -52,29 +52,46 @@ def _ts_max(x: torch.Tensor, d: int) -> torch.Tensor:
 
 
 def _ts_std(x: torch.Tensor, d: int) -> torch.Tensor:
-    """时序滚动标准差。"""
+    """时序滚动标准差。使用 cumsum 公式避免 unfold 开销。"""
     if d <= 1: return torch.zeros_like(x)
     B, T = x.shape
-    pad = torch.zeros((B, d - 1), device=x.device)
-    x_pad = torch.cat([pad, x], dim=1)
-    windows = x_pad.unfold(1, d, 1)
-    return windows.std(dim=-1)
+    # cumsum 公式: Var(X) = E[X^2] - E[X]^2
+    x2 = x * x
+    pad = torch.zeros((B, d - 1), device=x.device, dtype=x.dtype)
+    cs = torch.cumsum(torch.cat([pad, x], dim=1), dim=1)
+    cs2 = torch.cumsum(torch.cat([pad, x2], dim=1), dim=1)
+    # 滚动求和
+    roll_sum = cs[:, d:] - cs[:, :-d]
+    roll_sum2 = cs2[:, d:] - cs2[:, :-d]
+    mean = roll_sum / d
+    var = roll_sum2 / d - mean * mean
+    return torch.sqrt(var.clamp(min=1e-12))
 
 
 def _ts_corr(x: torch.Tensor, y: torch.Tensor, d: int) -> torch.Tensor:
-    """两因子滚动 Pearson 相关系数。"""
+    """两因子滚动 Pearson 相关系数。使用 cumsum 公式避免 unfold。"""
     if d <= 1: return torch.zeros_like(x)
     B, T = x.shape
-    pad = torch.zeros((B, d - 1), device=x.device)
-    x_pad = torch.cat([pad, x], dim=1)
-    y_pad = torch.cat([pad, y], dim=1)
-    xw = x_pad.unfold(1, d, 1)
-    yw = y_pad.unfold(1, d, 1)
-    xm = xw - xw.mean(dim=-1, keepdim=True)
-    ym = yw - yw.mean(dim=-1, keepdim=True)
-    cov = (xm * ym).mean(dim=-1)
-    std = xw.std(dim=-1) * yw.std(dim=-1) + 1e-8
-    return cov / std
+    pad = torch.zeros((B, d - 1), device=x.device, dtype=x.dtype)
+    xy = x * y
+    x2 = x * x
+    y2 = y * y
+    cs_x = torch.cumsum(torch.cat([pad, x], dim=1), dim=1)
+    cs_y = torch.cumsum(torch.cat([pad, y], dim=1), dim=1)
+    cs_xy = torch.cumsum(torch.cat([pad, xy], dim=1), dim=1)
+    cs_x2 = torch.cumsum(torch.cat([pad, x2], dim=1), dim=1)
+    cs_y2 = torch.cumsum(torch.cat([pad, y2], dim=1), dim=1)
+    # 滚动求和
+    sx = cs_x[:, d:] - cs_x[:, :-d]
+    sy = cs_y[:, d:] - cs_y[:, :-d]
+    sxy = cs_xy[:, d:] - cs_xy[:, :-d]
+    sx2 = cs_x2[:, d:] - cs_x2[:, :-d]
+    sy2 = cs_y2[:, d:] - cs_y2[:, :-d]
+    # Pearson: cov / (std_x * std_y)
+    cov = sxy / d - (sx / d) * (sy / d)
+    var_x = (sx2 / d - (sx / d) ** 2).clamp(min=1e-12)
+    var_y = (sy2 / d - (sy / d) ** 2).clamp(min=1e-12)
+    return cov / (torch.sqrt(var_x) * torch.sqrt(var_y) + 1e-8)
 
 
 def _cs_rank(x: torch.Tensor) -> torch.Tensor:
