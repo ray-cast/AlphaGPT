@@ -28,7 +28,7 @@ class AlphaEngine:
         self.sft_steps = sft_steps if sft_steps is not None else ModelConfig.SFT_STEPS
 
         # Standard optimizer
-        self.opt = torch.optim.AdamW(self.model.parameters(), lr=3e-4)
+        self.opt = torch.optim.AdamW(self.model.parameters(), lr=3e-4, weight_decay=1e-5)
 
         total_steps = ModelConfig.TRAIN_STEPS + self.sft_steps
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
