@@ -22,7 +22,7 @@ class ModelConfig:
     # ---------- 训练参数 ----------
     BATCH_SIZE = 1024
     TRAIN_STEPS = 500
-    MAX_FORMULA_LEN = 10
+    MAX_FORMULA_LEN = 8             # 限制公式长度，防止过拟合，短小精悍的公式往往更稳
 
     # ---------- A股交易成本 ----------
     TOTAL_BUY_COST = 0.00025 + 0.001     # 买入成本（佣金万2.5 + 滑点千1）
@@ -37,6 +37,11 @@ class ModelConfig:
     # ---------- 早停 ----------
     PATIENCE_LIMIT = 50           # 连续 N 步无新 best 则早停
     MIN_TRAIN_STEPS = 300         # 至少跑 N 步再允许早停（等 entropy 退火到 ≈0.06）
+
+    # ---------- PPO ----------
+    PPO_EPOCHS = 4           # 每次 rollout 的 PPO 更新轮数
+    PPO_CLIP_EPS = 0.2       # PPO clip epsilon
+    GRAD_CLIP_NORM = 0.5     # 梯度裁剪范数
 
     # ---------- 探索与多样性 ----------
     ENTROPY_COEF_START = 0.20      # 起始 entropy 系数
@@ -60,7 +65,7 @@ class ModelConfig:
     # 逐步增加公式最大长度，先搜短公式再搜长公式，压缩搜索空间
     # 格式: [(步数阈值, 最大公式长度), ...]，按步数递增排列
     # None = 关闭课程学习，全程使用 MAX_FORMULA_LEN
-    CURRICULUM_SCHEDULE = [(0, 6), (80, 8), (200, 10)]
+    CURRICULUM_SCHEDULE = [(0, 4), (100, 6), (200, 8)]
 
     # ---------- SFT 热启动 ----------
     SEED_FORMULA_NAMES = [         # 种子公式（名称格式，token ID 动态计算）
