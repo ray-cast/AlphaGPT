@@ -179,16 +179,16 @@ class Indicators:
         return eps_ttm * roe * 100.0
 
 class FeatureEngineer:
-    INPUT_DIM = 11
+    INPUT_DIM = 13
 
     @staticmethod
     def compute_features(raw_dict):
         """
-        从原始 OHLCV 数据计算 14 维因子。
+        从原始 OHLCV 数据计算 13 维因子。
 
         输入 raw_dict 键: open, high, low, close, vol, amount, turnover_rate
           各自形状 [num_stocks, T]
-        输出: [num_stocks, 14, T]
+        输出: [num_stocks, 13, T]
         """
         c = raw_dict["close"]
         o = raw_dict["open"]
@@ -234,18 +234,23 @@ class FeatureEngineer:
         # ---- 因子 11: 价值锚 P_value (EPS_TTM × ROE × 100) ----
         p_value = Indicators.p_value(c, raw_dict.get("pe_ttm"), raw_dict.get("roe"))
 
+        # ---- 因子 12: 波动率聚集（短/长期波动率比） ----
+        vol_cluster = Indicators.vol_cluster(c, 5, 20)
+
         features = torch.stack([
             robust_norm(ret),          # [0] RET
             robust_norm(ret5),         # [1] RET5
             robust_norm(vol_chg),      # [2] VOL_CHG
-            turn_normed,               # [3] TURN
-            robust_norm(pressure),     # [4] PRESSURE
-            robust_norm(dev),          # [5] DEV
-            robust_norm(rel_strength), # [6] RSI
-            robust_norm(trend),        # [7] TREND
-            robust_norm(hl_range),     # [8] HL_RANGE
-            robust_norm(close_pos),    # [9] CLOSE_POS
-            robust_norm(p_value),      # [10] P_VALUE
+            robust_norm(amt_ratio),    # [3] AMT_RATIO
+            turn_normed,               # [4] TURN
+            robust_norm(pressure),     # [5] PRESSURE
+            robust_norm(dev),          # [6] DEV
+            robust_norm(rel_strength), # [7] RSI
+            robust_norm(trend),        # [8] TREND
+            robust_norm(hl_range),     # [9] HL_RANGE
+            robust_norm(close_pos),    # [10] CLOSE_POS
+            robust_norm(p_value),      # [11] P_VALUE
+            robust_norm(vol_cluster),  # [12] VOL_CLUSTER
         ], dim=1)
 
         # 清理 Inf（但保留 NaN 标记停牌日）

@@ -109,6 +109,50 @@ def _cs_rank(x: torch.Tensor) -> torch.Tensor:
     return x.argsort(dim=0).argsort(0).float() / (x.shape[0] + 1e-6)
 
 
+def _cs_zscore(x: torch.Tensor) -> torch.Tensor:
+    """截面 z-score 标准化：保留幅度信息，不同于 rank 只保留排序。"""
+    mean = torch.nanmean(x, dim=0, keepdim=True)
+    std = torch.nanmean((x - mean) ** 2, dim=0, keepdim=True).sqrt().clamp(min=1e-6)
+    return (x - mean) / std
+
+
+def _ts_argmin(x: torch.Tensor, d: int) -> torch.Tensor:
+    """时序 argmin：过去 d 天内最小值出现的位置（归一化到 [0, 1]）。"""
+    if d <= 1: return torch.zeros_like(x)
+    B, T = x.shape
+    pad = torch.full((B, d - 1), float('inf'), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    windows = x_pad.unfold(1, d, 1)
+    # argmin 位置归一化
+    idx = windows.argmin(dim=-1).float() / (d - 1)
+    return idx
+
+
+def _ts_argmax(x: torch.Tensor, d: int) -> torch.Tensor:
+    """时序 argmax：过去 d 天内最大值出现的位置（归一化到 [0, 1]）。"""
+    if d <= 1: return torch.zeros_like(x)
+    B, T = x.shape
+    pad = torch.full((B, d - 1), float('-inf'), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    windows = x_pad.unfold(1, d, 1)
+    idx = windows.argmax(dim=-1).float() / (d - 1)
+    return idx
+
+
+def _ts_sum(x: torch.Tensor, d: int) -> torch.Tensor:
+    """时序滚动求和。使用 cumsum 公式避免 unfold 开销。"""
+    if d <= 1: return x
+    B, T = x.shape
+    pad = torch.zeros((B, d - 1), device=x.device, dtype=x.dtype)
+    cs = torch.cumsum(torch.cat([pad, x], dim=1), dim=1)
+    return cs[:, d:] - cs[:, :-d]
+
+
+def _signedpower(x: torch.Tensor) -> torch.Tensor:
+    """WQ101 核心算子：sign(x) * |x|^0.5，非线性信号放大。"""
+    return torch.sign(x) * torch.pow(torch.abs(x) + 1e-8, 0.5)
+
+
 @torch.jit.script
 def _ts_delay(x: torch.Tensor, d: int) -> torch.Tensor:
     if d == 0: return x
@@ -162,19 +206,30 @@ OPS_CONFIG = [
     ('NEG', lambda x: -x, 1),
     ('ABS', torch.abs, 1),
     ('SIGN', torch.sign, 1),
+    ('SIGNEDPOWER', _signedpower, 1),          # WQ101 核心非线性放大
     # ---- 控制流 ----
     ('GATE', _op_gate, 3),
     # ---- 截面算子 ----
     ('CS_RANK', _cs_rank, 1),
+    ('CS_ZSCORE', _cs_zscore, 1),              # 截面z-score保留幅度
     ('CROSS', lambda x, y: _cs_rank(x) * _cs_rank(y), 2),
-    # ---- 时序算子 ----
+    # ---- 时序算子（20日窗口） ----
     ('TS_RANK20', lambda x: _ts_rank(x, 20), 1),
     ('TS_DECAY20', lambda x: _ts_decay_linear(x, 20), 1),
+    ('TS_STD20', lambda x: _ts_std(x, 20), 1),
+    ('TS_CORR20', lambda x, y: _ts_corr(x, y, 20), 2),
+    ('TS_MEAN20', lambda x: _ts_mean(x, 20), 1),
+    # ---- 时序算子（10日窗口） ----
+    ('TS_RANK10', lambda x: _ts_rank(x, 10), 1),
+    ('TS_DECAY10', lambda x: _ts_decay_linear(x, 10), 1),
+    ('TS_DELTA10', lambda x: _ts_delta(x, 10), 1),
+    # ---- 时序算子（5日窗口） ----
     ('TS_DELTA5', lambda x: _ts_delta(x, 5), 1),
     ('TS_MIN5', lambda x: _ts_min(x, 5), 1),
     ('TS_MAX5', lambda x: _ts_max(x, 5), 1),
-    ('TS_STD20', lambda x: _ts_std(x, 20), 1),
-    ('TS_CORR20', lambda x, y: _ts_corr(x, y, 20), 2),
-    ('TS_MEAN20', lambda x: _ts_mean(x, 20), 1),  # 新增简单均值
-    ('TS_DELAY5', lambda x: _ts_delay(x, 5), 1),  # 新增滞后算子
+    ('TS_SUM5', lambda x: _ts_sum(x, 5), 1),  # 滚动求和
+    ('TS_ARGMIN5', lambda x: _ts_argmin(x, 5), 1),   # 极值位置
+    ('TS_ARGMAX5', lambda x: _ts_argmax(x, 5), 1),
+    ('TS_DELAY5', lambda x: _ts_delay(x, 5), 1),
+    ('TS_MEAN5', lambda x: _ts_mean(x, 5), 1),
 ]

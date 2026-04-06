@@ -22,7 +22,7 @@ class ModelConfig:
     # ---------- 训练参数 ----------
     BATCH_SIZE = 1024
     TRAIN_STEPS = 500
-    MAX_FORMULA_LEN = 8             # 限制公式长度，防止过拟合，短小精悍的公式往往更稳
+    MAX_FORMULA_LEN = 12            # 支持 WQ101 典型三层嵌套结构 rank(signedpower(corr(...)))
 
     # ---------- A股交易成本 ----------
     TOTAL_BUY_COST = 0.00025 + 0.001     # 买入成本（佣金万2.5 + 滑点千1）
@@ -48,7 +48,7 @@ class ModelConfig:
     ENTROPY_COEF_END = 0.01        # 终止 entropy 系数
 
     # ---------- 因子维度 ----------
-    INPUT_DIM = 11
+    INPUT_DIM = 13
 
     # ---------- 信号输出 ----------
     SIGNAL_DIR = os.path.join(_PROJECT_ROOT, "signals")
@@ -65,7 +65,7 @@ class ModelConfig:
     # 逐步增加公式最大长度，先搜短公式再搜长公式，压缩搜索空间
     # 格式: [(步数阈值, 最大公式长度), ...]，按步数递增排列
     # None = 关闭课程学习，全程使用 MAX_FORMULA_LEN
-    CURRICULUM_SCHEDULE = None  # 关闭课程学习，全程使用 MAX_FORMULA_LEN
+    CURRICULUM_SCHEDULE = [(0, 6), (100, 8), (200, 10), (300, 12)]  # 课程学习：逐步增加公式复杂度
 
     # ---------- SFT 热启动 ----------
     SEED_FORMULA_NAMES = [         # 种子公式（名称格式，token ID 动态计算）
