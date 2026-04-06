@@ -86,10 +86,18 @@ class StrategyReport:
             scores_filter, valid_mask, min(self.top_n, N), rank_gap
         )
 
-        # 熊市减仓系数：市场弱势时收益按半仓计算（不影响实际换手）
+        # 熊市应对：与 AshareBacktest 一致的估值感知减仓逻辑
         bear_mask = market_ma20 < 0
-        bear_scale = torch.ones(T, device=alpha_oos.device)
-        bear_scale[bear_mask] = 0.5
+        if pe_ttm_oos is not None and roe_oos is not None and bear_mask.any():
+            margin = roe_oos / (pe_ttm_oos + 1e-9) * 100.0
+            bear_scale_stock = 0.5 + 0.5 * torch.sigmoid((margin - 0.8) * 5.0)
+            bear_scale_stock = bear_scale_stock.clamp(0.3, 1.0)
+            bear_scale = torch.ones(T, device=alpha_oos.device)
+            bear_scale[bear_mask] = 0.75
+            stock_scale = bear_scale.unsqueeze(0).expand_as(position) * bear_scale_stock
+            stock_scale[:, ~bear_mask] = 1.0
+        else:
+            stock_scale = torch.ones_like(position)
 
         # 换手（基于实际选股变化，不含熊市虚拟减仓）
         prev_pos = torch.roll(position, 1, dims=1)
@@ -99,7 +107,7 @@ class StrategyReport:
         tx_cost = turnover * avg_cost
 
         # 组合收益（熊市减仓应用到收益端，不产生虚假换手成本）
-        gross_pnl = position * target_oos * bear_scale.unsqueeze(0)
+        gross_pnl = position * target_oos * stock_scale
         net_pnl = gross_pnl - tx_cost
 
         daily_ret = net_pnl.sum(dim=0).cpu().numpy() / (position.sum(dim=0).clamp(min=1).cpu().numpy())
