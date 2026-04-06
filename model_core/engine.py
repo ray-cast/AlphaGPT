@@ -265,32 +265,24 @@ class AlphaEngine:
 
             unique_ratio = len(unique_map) / bs
 
-            # ---- Advantage 计算：top-k 加权 + 归一化 raw score ----
-            # 训练进度（供 top-k 动态比例和 entropy 退火共用）
+            # ---- Advantage 计算：top-k 筛选 + 归一化 ----
+            # 训练进度（供 entropy 退火共用）
             progress = step / max(ModelConfig.TRAIN_STEPS - 1, 1)
-            # Raw score 归一化（中心化 + 缩放到合理范围）
+            # Raw score 归一化
             rew_std = rewards.std() + 1e-6
             raw_normalized = (rewards - rewards.mean()) / rew_std
             raw_normalized = raw_normalized.clamp(-3, 3)
 
-            # Top-k 加权：动态比例，早期 30%→后期 10%，渐进收窄
-            # 早期需要更大覆盖面建立探索方向，后期收窄来精调
+            # Top-k 筛选：动态比例，早期 30%→后期 10%
             topk_ratio = max(0.1, 0.3 - 0.2 * progress)
             k = max(int(bs * topk_ratio), 10)
             sorted_indices = rewards.argsort(descending=True)
-            topk_mask = torch.zeros(bs, device=ModelConfig.DEVICE)
-            topk_mask[sorted_indices[:k]] = 1.0
-            # top-k 内部也保留排名梯度（排在前面给更高权重）
-            topk_ranks = torch.zeros(bs, device=ModelConfig.DEVICE)
-            for rank_pos, idx in enumerate(sorted_indices[:k]):
-                topk_ranks[idx] = (k - rank_pos) / k  # 线性衰减：第1名=1.0，第k名≈0
 
-            # 混合：top-k 权重 60% + raw 归一化 40%
-            adv = 0.6 * topk_ranks + 0.4 * (raw_normalized / 3.0)
-            # 非 top-k 公式用 raw_normalized（已经是负值为主）
-            adv = adv * topk_mask + (raw_normalized / 3.0) * (1 - topk_mask)
+            # top-k 内保留归一化分数，非 top-k 置零
+            adv = torch.zeros(bs, device=ModelConfig.DEVICE)
+            adv[sorted_indices[:k]] = raw_normalized[sorted_indices[:k]]
 
-            # 多样性：重复惩罚 + 结构多样性奖励
+            # 多样性：重复惩罚
             diversity_bonus = torch.zeros(bs, device=ModelConfig.DEVICE)
             if unique_ratio < ModelConfig.DIVERSITY_TARGET:
                 formula_counts = {}
@@ -301,24 +293,6 @@ class AlphaEngine:
                     count = formula_counts[formula_keys[i]]
                     if count > 1:
                         diversity_bonus[i] = -ModelConfig.DIVERSITY_PENALTY * (count / bs)
-
-            # 结构多样性奖励：使用多种类型算子（截面/时序）的公式加分
-            # 鼓励模型探索不同模式，避免坍缩到纯时序或纯算术
-            cs_op_ids = set()   # 截面算子 token IDs
-            ts_op_ids = set()   # 时序算子 token IDs
-            for i, cfg in enumerate(OPS_CONFIG):
-                token_id = feat_count + i
-                if cfg[0] in ('CS_RANK', 'CROSS'):
-                    cs_op_ids.add(token_id)
-                elif cfg[0].startswith('TS_'):
-                    ts_op_ids.add(token_id)
-            for i in range(bs):
-                used_tokens = set(formula_keys[i])
-                used_cs = len(used_tokens & cs_op_ids)
-                used_ts = len(used_tokens & ts_op_ids)
-                # 用了截面+时序各至少一种 → 额外奖励
-                if used_cs > 0 and used_ts > 0:
-                    diversity_bonus[i] += 0.3
 
             adv = adv + diversity_bonus
 

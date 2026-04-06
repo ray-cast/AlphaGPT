@@ -1,6 +1,6 @@
 import torch
 from .config import ModelConfig
-from .filter import apply_fundamental_filter, apply_valuation_margin
+from .filter import apply_fundamental_filter
 
 
 class AshareBacktest:
@@ -55,11 +55,8 @@ class AshareBacktest:
         scores[~valid_mask] = float('-inf')
         scores[turnover_rate <= self.min_turnover] = float('-inf')
 
-        # 基本面过滤
-        apply_fundamental_filter(scores, pe_ttm, roe)
-
-        # 估值安全边际：低估股票截面加分，高估股票减分
-        apply_valuation_margin(scores, pe_ttm, roe)
+        # 基本面过滤（训练用 soft penalty，保留探索空间）
+        apply_fundamental_filter(scores, pe_ttm, roe, soft=True)
 
         # 市场状态判断：等权组合收益的 20 日均线（排除停牌）
         valid_target = target_ret.clone()
@@ -147,10 +144,9 @@ class AshareBacktest:
         if N_stocks > 10 and sortino.item() > -2.0:
             ic_bonus = self._vectorized_ic(factors, target_ret, valid_mask, T_len, N_stocks)
 
-        # 综合得分：方向性 20% + 风险调整 30% + IC 50% - 惩罚项
-        # IC 权重最高：截面选股能力是最核心的信号
-        fitness = (0.2 * direction_score + 0.3 * risk_score
-                   + 0.5 * ic_bonus - dd_penalty - turnover_penalty)
+        # 综合得分：方向性 30% + 风险调整 40% + IC 30% - 惩罚项
+        fitness = (0.3 * direction_score + 0.4 * risk_score
+                   + 0.3 * ic_bonus - dd_penalty - turnover_penalty)
 
         return fitness, cum_ret.item()
 
