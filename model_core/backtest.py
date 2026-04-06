@@ -1,6 +1,6 @@
 import torch
 from .config import ModelConfig
-from .filter import apply_fundamental_filter
+from .filter import apply_fundamental_filter, apply_valuation_margin
 
 
 class AshareBacktest:
@@ -16,6 +16,7 @@ class AshareBacktest:
         self.sell_cost = ModelConfig.TOTAL_SELL_COST
         self.min_turnover = ModelConfig.MIN_TURNOVER_RATE
         self.top_n = ModelConfig.TOP_N_STOCKS
+        self.rebalance_freq = ModelConfig.REBALANCE_FREQ
 
     def evaluate(self, factors, raw_data, target_ret, start_idx=0, end_idx=None):
         """
@@ -57,6 +58,9 @@ class AshareBacktest:
         # 基本面过滤
         apply_fundamental_filter(scores, pe_ttm, roe)
 
+        # 估值安全边际：低估股票截面加分，高估股票减分
+        apply_valuation_margin(scores, pe_ttm, roe)
+
         # 市场状态判断：等权组合收益的 20 日均线（排除停牌）
         valid_target = target_ret.clone()
         valid_target[~valid_mask] = 0.0
@@ -66,12 +70,26 @@ class AshareBacktest:
 
         # 构建持仓矩阵（引入换手惩罚阈值）
         rank_gap = ModelConfig.REBALANCE_RANK_GAP
-        position = self._build_position(scores, valid_mask, self.top_n, rank_gap)
+        position = self._build_position(scores, valid_mask, self.top_n, rank_gap, self.rebalance_freq)
 
-        # 熊市减仓系数：市场弱势时收益按半仓计算（不影响实际换手）
+        # 熊市应对：用估值安全边际替代二值减仓开关
+        # 当市场弱势（MA20<0）时，低估值股票天然抗跌，无需粗暴砍半仓
+        # 改为：熊市时给低估值持仓更大权重，高估值持仓更小权重
         bear_mask = market_ma20 < 0
-        bear_scale = torch.ones(T_len, device=factors.device)
-        bear_scale[bear_mask] = 0.5
+        if pe_ttm is not None and roe is not None and bear_mask.any():
+            # 计算持仓股票的估值安全边际（与 filter.py 同逻辑）
+            margin = roe / (pe_ttm + 1e-9) * 100.0
+            # 低估（margin>1）→ 缩减系数小（接近1），高估 → 缩减系数大（接近0.5）
+            bear_scale_stock = 0.5 + 0.5 * torch.sigmoid((margin - 0.8) * 5.0)
+            bear_scale_stock = bear_scale_stock.clamp(0.3, 1.0)
+            # 只在熊市日应用，牛市日不缩减
+            bear_scale = torch.ones(T_len, device=factors.device)
+            bear_scale[bear_mask] = 0.75  # 熊市基础缩减到75%
+            # 个股维度：持仓 × 估值系数 × 熊市基础系数
+            stock_scale = bear_scale.unsqueeze(0).expand_as(position) * bear_scale_stock
+            stock_scale[:, ~bear_mask] = 1.0  # 牛市日不缩减
+        else:
+            stock_scale = torch.ones_like(position)
 
         # 换手（基于实际选股变化，不含熊市虚拟减仓）
         prev_pos = torch.roll(position, 1, dims=1)
@@ -82,8 +100,8 @@ class AshareBacktest:
         avg_cost = (self.buy_cost + self.sell_cost) / 2.0
         tx_cost = turnover * avg_cost
 
-        # PnL：应用熊市减仓系数到收益端（不产生虚假换手成本）
-        gross_pnl = position * target_ret * bear_scale.unsqueeze(0)
+        # PnL：应用估值感知的缩减系数（不产生虚假换手成本）
+        gross_pnl = position * target_ret * stock_scale
         net_pnl = gross_pnl - tx_cost
 
         # 每天 portfolio 收益（按实际持仓权重归一化，熊市减仓时分母会相应减小）
@@ -138,17 +156,20 @@ class AshareBacktest:
         return fitness, cum_ret.item()
 
     @staticmethod
-    def _build_position(scores, valid_mask, top_n, rank_gap):
-        """构建持仓矩阵，引入换手惩罚阈值。
+    def _build_position(scores, valid_mask, top_n, rank_gap, rebalance_freq=20):
+        """构建持仓矩阵，引入再平衡周期和换手惩罚阈值。
 
-        每日保留上一日持仓，只有当新候选股票的截面排名领先当前最弱持仓
+        每 rebalance_freq 个交易日执行一次截面选股（再平衡），
+        非再平衡日沿用上一日持仓（仅剔除停牌/退成分股）。
+        再平衡日内保留上一日持仓，只有当新候选股票的截面排名领先当前最弱持仓
         超过 rank_gap 名时才换仓，以减少无谓换手和交易成本。
 
         Args:
-            scores:     [N_stocks, T] 分数（无效股票已设 -inf）
-            valid_mask: [N_stocks, T] bool 有效股票掩码
-            top_n:      持仓数量
-            rank_gap:   换仓排名阈值（0 = 每日完全重选，即关闭阈值）
+            scores:        [N_stocks, T] 分数（无效股票已设 -inf）
+            valid_mask:    [N_stocks, T] bool 有效股票掩码
+            top_n:         持仓数量
+            rank_gap:      换仓排名阈值（0 = 每日完全重选，即关闭阈值）
+            rebalance_freq: 再平衡周期（交易日），1 = 每日再平衡
         Returns:
             position:   [N_stocks, T] 持仓矩阵（0/1）
         """
@@ -180,6 +201,25 @@ class AshareBacktest:
             held = [i for i in held if today_valid[i]]
             held_set = set(held)
 
+            # 非再平衡日：沿用上一日持仓，仅保留有效股票
+            if rebalance_freq > 1 and t > 0 and (t % rebalance_freq) != 0:
+                # 如果空缺席位（停牌导致），从当日排名中补充
+                if len(held) < top_n:
+                    k = min(top_n * 2, N_stocks)
+                    _, candidates = scores[:, t].topk(k)
+                    missing = top_n - len(held)
+                    for idx in candidates.tolist():
+                        if missing <= 0:
+                            break
+                        if idx not in held_set:
+                            held.append(idx)
+                            held_set.add(idx)
+                            missing -= 1
+                for idx in held:
+                    position[idx, t] = 1.0
+                continue
+
+            # 再平衡日：执行完整截面选股
             # 补充空缺席位（首次建仓或持仓不足时）
             missing = top_n - len(held)
             if missing > 0:

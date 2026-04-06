@@ -53,11 +53,18 @@ class ModelConfig:
     SIGNAL_DIR = os.path.join(_PROJECT_ROOT, "signals")
     SIGNAL_THRESHOLD = 0.7         # sigmoid 阈值
     TOP_N_STOCKS = 10              # 截面选股数量
+    REBALANCE_FREQ = 20            # 再平衡周期（交易日）：每 N 天执行一次截面选股，非再平衡日沿用上一日持仓
     REBALANCE_RANK_GAP = 5         # 换仓排名阈值：新候选领先最弱持仓至少N名才调仓（0=关闭）
 
     # ---------- 基本面过滤 ----------
     MAX_PE_TTM = 25                # 最高市盈率TTM（排除高估值；PE<=0 隐含排除亏损股即 EPS<=0）
     MIN_ROE = 0                    # 最低ROE（通过 PB/PE_TTM 近似；排除低效公司）
+
+    # ---------- 估值安全边际 ----------
+    # margin = ROE / PE_TTM × 100
+    # > 100% → 低估（安全边际为正）→ 截面加分
+    # < 100% → 高估 → 截面减分
+    VALUATION_MARGIN_WEIGHT = 0.5  # 估值安全边际权重（0 = 关闭，越大越偏向低估值）
 
     # ---------- SFT 热启动 ----------
     SEED_FORMULA_NAMES = [         # 种子公式（名称格式，token ID 动态计算）
