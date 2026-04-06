@@ -28,7 +28,7 @@ class AlphaEngine:
         self.sft_steps = sft_steps if sft_steps is not None else ModelConfig.SFT_STEPS
 
         # Standard optimizer
-        self.opt = torch.optim.AdamW(self.model.parameters(), lr=1e-3)
+        self.opt = torch.optim.AdamW(self.model.parameters(), lr=3e-4)
 
         total_steps = ModelConfig.TRAIN_STEPS + self.sft_steps
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -227,13 +227,13 @@ class AlphaEngine:
                     clean_feat=self.loader.clean_feat_tensor)
 
                 if res is None:
-                    unique_map[fkey] = (-5.0, 0.0)
-                    rewards[i] = -5.0
+                    unique_map[fkey] = (-1.0, 0.0)
+                    rewards[i] = -1.0
                     continue
 
                 if res.std() < 1e-4:
-                    unique_map[fkey] = (-2.0, 0.0)
-                    rewards[i] = -2.0
+                    unique_map[fkey] = (-0.5, 0.0)
+                    rewards[i] = -0.5
                     continue
 
                 score, ret_val = self.bt.evaluate(
@@ -271,7 +271,7 @@ class AlphaEngine:
             # Raw score 归一化
             rew_std = rewards.std() + 1e-6
             raw_normalized = (rewards - rewards.mean()) / rew_std
-            raw_normalized = raw_normalized.clamp(-3, 3)
+            raw_normalized = raw_normalized.clamp(-2, 2)
 
             # Top-k 筛选：动态比例，早期 30%→后期 10%
             topk_ratio = max(0.1, 0.3 - 0.2 * progress)

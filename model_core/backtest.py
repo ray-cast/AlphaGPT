@@ -98,27 +98,31 @@ class AshareBacktest:
         # 活跃度不足惩罚（硬性门槛，提前返回）
         active_days = (position.sum(dim=0) > 0).float().sum()
         if active_days < 10:
-            return torch.tensor(-10.0, device=factors.device), 0.0
+            return torch.tensor(-1.0, device=factors.device), 0.0
 
-        # Sharpe（方向性 + 风险调整合一）
-        daily_std = daily_pnl.std() + 1e-6
-        sharpe = mean_ret / daily_std
-        sharpe_score = torch.tanh(sharpe * 2.0)
+        # Sortino（只惩罚下行风险，不惩罚上行波动）
+        downside = daily_pnl[daily_pnl < 0]
+        if downside.numel() > 5:
+            down_std = downside.std() + 1e-6
+        else:
+            down_std = daily_pnl.std() + 1e-6
+        sortino = mean_ret / down_std * (252 ** 0.5)  # 年化 Sortino
+        sortino_score = torch.clamp(sortino, -3.0, 5.0)
 
         # 回撤惩罚（连续化，梯度友好）
         cum_curve = torch.cumsum(daily_pnl, dim=0)
         running_max = torch.cummax(cum_curve, dim=0)[0]
         drawdown = cum_curve - running_max
         max_dd = drawdown.min()
-        dd_penalty = torch.relu(-max_dd - 0.05) * 2.0
+        dd_penalty = torch.min(torch.relu(-max_dd - 0.05) * 2.0, torch.tensor(2.0, device=factors.device))
 
         # IC 奖励（截面预测能力）
         ic_bonus = 0.0
         if N_stocks > 10:
             ic_bonus = self._vectorized_ic(factors, target_ret, valid_mask, T_len, N_stocks)
 
-        # 综合得分：Sharpe 60% + IC 40% - 回撤惩罚
-        fitness = 0.6 * sharpe_score + 0.4 * ic_bonus - dd_penalty
+        # 综合得分：Sortino + IC - 回撤惩罚
+        fitness = sortino_score + ic_bonus - dd_penalty
 
         return fitness, cum_ret.item()
 
