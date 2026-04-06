@@ -282,20 +282,6 @@ class AlphaEngine:
             adv = torch.zeros(bs, device=ModelConfig.DEVICE)
             adv[sorted_indices[:k]] = raw_normalized[sorted_indices[:k]]
 
-            # 多样性：重复惩罚
-            diversity_bonus = torch.zeros(bs, device=ModelConfig.DEVICE)
-            if unique_ratio < ModelConfig.DIVERSITY_TARGET:
-                formula_counts = {}
-                for i in range(bs):
-                    fkey = formula_keys[i]
-                    formula_counts[fkey] = formula_counts.get(fkey, 0) + 1
-                for i in range(bs):
-                    count = formula_counts[formula_keys[i]]
-                    if count > 1:
-                        diversity_bonus[i] = -ModelConfig.DIVERSITY_PENALTY * (count / bs)
-
-            adv = adv + diversity_bonus
-
             # Critic baseline：用 value prediction 减去均值后的优势
             value_pred = torch.stack(values, 1).squeeze(-1).mean(dim=1)
             adv = adv - value_pred.detach()  # 用 critic 预测作为 baseline

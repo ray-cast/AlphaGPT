@@ -41,8 +41,6 @@ class ModelConfig:
     # ---------- 探索与多样性 ----------
     ENTROPY_COEF_START = 0.20      # 起始 entropy 系数
     ENTROPY_COEF_END = 0.02        # 终止 entropy 系数
-    DIVERSITY_TARGET = 0.3         # 低于此 unique ratio 时启用多样性惩罚
-    DIVERSITY_PENALTY = 0.5        # 重复公式的 advantage 惩罚强度
 
     # ---------- 因子维度 ----------
     INPUT_DIM = 15
