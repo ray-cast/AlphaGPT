@@ -310,7 +310,7 @@ class AlphaEngine:
                 active = (open_slots_at_t[:, t] > 0).float()
                 step_adv = adv * active
                 policy_loss += -log_probs[t] * step_adv
-                entropy += entropies[t].sum()
+                entropy += entropies[t].mean()
             policy_loss = policy_loss.mean()
 
             # Critic value loss（value_pred 已在上方计算）
