@@ -96,7 +96,7 @@ class AshareBacktest:
         # 活跃度不足惩罚（硬性门槛，提前返回）
         active_days = (position.sum(dim=0) > 0).float().sum()
         if active_days < 10:
-            return torch.tensor(-1.0, device=factors.device), 0.0
+            return torch.tensor(-1.0, device=factors.device), 0.0, daily_pnl, turnover
 
         # Sortino（只惩罚下行风险，不惩罚上行波动）
         downside = daily_pnl[daily_pnl < 0]
@@ -122,7 +122,7 @@ class AshareBacktest:
         # 综合得分：Sortino + IC - 回撤惩罚
         fitness = sortino_score + ic_bonus - dd_penalty
 
-        return fitness, cum_ret.item()
+        return fitness, cum_ret.item(), daily_pnl, turnover
 
     @staticmethod
     def _build_position(scores, valid_mask, top_n, rank_gap, rebalance_freq=20):

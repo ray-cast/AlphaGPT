@@ -266,7 +266,7 @@ class AlphaEngine:
                     rewards[i] = -0.5
                     continue
 
-                score, ret_val = self.bt.evaluate(
+                score, ret_val, _, _ = self.bt.evaluate(
                     res, self.loader.raw_data_cache, self.loader.target_ret,
                     start_idx=self.valid_idx, end_idx=self.train_idx
                 )
@@ -276,7 +276,7 @@ class AlphaEngine:
 
                 if score.item() > self.best_score:
                     # 验证集检验（2017-2018 熊市压力测试）
-                    val_score, _ = self.bt.evaluate(
+                    val_score, _, _, _ = self.bt.evaluate(
                         res, self.loader.raw_data_cache, self.loader.target_ret,
                         start_idx=0, end_idx=self.valid_idx
                     )

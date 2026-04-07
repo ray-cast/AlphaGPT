@@ -7,22 +7,16 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch
 
-from .config import ModelConfig
 from .backtest import AshareBacktest
-from .filter import apply_fundamental_filter
 
 
 class StrategyReport:
     def __init__(self, loader):
         self.loader = loader
-        self.top_n = ModelConfig.TOP_N_STOCKS
-        self.buy_cost = ModelConfig.TOTAL_BUY_COST
-        self.sell_cost = ModelConfig.TOTAL_SELL_COST
-        self.min_turnover = ModelConfig.MIN_TURNOVER_RATE
 
     def evaluate(self, alpha_values, split_type="val"):
         """
-        在指定区间评估策略表现。
+        在指定区间评估策略表现（复用 AshareBacktest 保证与训练一致）。
 
         Args:
             alpha_values: [num_stocks, T] 来自 PrefixVM 的 alpha 分值
@@ -40,83 +34,33 @@ class StrategyReport:
         else:  # "val" = 验证集 (17-18)
             start = 0
             end = loader.valid_idx
-        target_ret = loader.target_ret  # [num_stocks, T]
-        turnover_rate = loader.raw_data_cache.get(
-            "turnover_rate", torch.zeros_like(alpha_values)
-        )
-        suspended_all = loader.raw_data_cache.get(
-            "suspended", torch.zeros_like(alpha_values, dtype=torch.bool)
-        )
-        constituent_all = loader.raw_data_cache.get(
-            "constituent", torch.ones_like(alpha_values, dtype=torch.bool)
-        )
-        pe_ttm_all = loader.raw_data_cache.get("pe_ttm")
-        roe_all = loader.raw_data_cache.get("roe")
 
-        alpha_oos = alpha_values[:, start:end]
-        target_oos = target_ret[:, start:end]
-        turnover_oos = turnover_rate[:, start:end]
-        suspended_oos = suspended_all[:, start:end]
-        constituent_oos = constituent_all[:, start:end]
-        pe_ttm_oos = pe_ttm_all[:, start:end] if pe_ttm_all is not None else None
-        roe_oos = roe_all[:, start:end] if roe_all is not None else None
         oos_dates = loader.dates[start:end]
+        T = len(oos_dates)
 
-        N, T = alpha_oos.shape
-
-        # 排除停牌/非成分股（NaN 信号、NaN 收益、停牌、或非时点成分股）
-        valid_mask = ~(torch.isnan(alpha_oos) | torch.isnan(target_oos) | suspended_oos) & constituent_oos
-
-        # 构建持仓（复用 AshareBacktest 的逻辑，含动态仓位管理）
-        valid_target = target_oos.clone()
-        valid_target[~valid_mask] = 0.0
-        valid_count = valid_mask.float().sum(dim=0).clamp(min=1)
-        market_daily_ret = valid_target.sum(dim=0) / valid_count
-        market_ma20 = self._rolling_mean_1d(market_daily_ret, 20)
-
-        position = torch.zeros_like(alpha_oos)
-        # 与 AshareBacktest 一致：排除停牌+低换手后选股（含换手阈值）
-        scores_filter = alpha_oos.clone()
-        scores_filter[~valid_mask] = float('-inf')
-        scores_filter[turnover_oos <= self.min_turnover] = float('-inf')
-        # 基本面过滤
-        apply_fundamental_filter(scores_filter, pe_ttm_oos, roe_oos)
-        rank_gap = ModelConfig.REBALANCE_RANK_GAP
-        position = AshareBacktest._build_position(
-            scores_filter, valid_mask, min(self.top_n, N), rank_gap
+        # 复用训练回测引擎，确保报告结果与训练目标完全一致
+        bt = AshareBacktest()
+        _, _, daily_pnl, turnover = bt.evaluate(
+            alpha_values, loader.raw_data_cache, loader.target_ret,
+            start_idx=start, end_idx=end
         )
-
-        # 熊市应对：与 AshareBacktest 一致的估值感知减仓逻辑
-        bear_mask = market_ma20 < 0
-        if pe_ttm_oos is not None and roe_oos is not None and bear_mask.any():
-            margin = roe_oos / (pe_ttm_oos + 1e-9) * 100.0
-            bear_scale_stock = 0.5 + 0.5 * torch.sigmoid((margin - 0.8) * 5.0)
-            bear_scale_stock = bear_scale_stock.clamp(0.3, 1.0)
-            bear_scale = torch.ones(T, device=alpha_oos.device)
-            bear_scale[bear_mask] = 0.75
-            stock_scale = bear_scale.unsqueeze(0).expand_as(position) * bear_scale_stock
-            stock_scale[:, ~bear_mask] = 1.0
-        else:
-            stock_scale = torch.ones_like(position)
-
-        # 换手（基于实际选股变化，不含熊市虚拟减仓）
-        prev_pos = torch.roll(position, 1, dims=1)
-        prev_pos[:, 0] = 0.0
-        turnover = torch.abs(position - prev_pos)
-        avg_cost = (self.buy_cost + self.sell_cost) / 2.0
-        tx_cost = turnover * avg_cost
-
-        # 组合收益（熊市减仓应用到收益端，不产生虚假换手成本）
-        gross_pnl = position * target_oos * stock_scale
-        net_pnl = gross_pnl - tx_cost
-
-        daily_ret = net_pnl.sum(dim=0).cpu().numpy() / (position.sum(dim=0).clamp(min=1).cpu().numpy())
+        daily_ret = daily_pnl.cpu().numpy()
 
         # 基准：优先使用真实 HS300 指数日收益率，退化为等权基准
         if self.loader.benchmark_ret is not None:
             bench_daily = self.loader.benchmark_ret[start:end].cpu().numpy()
         else:
-            bench_daily = market_daily_ret.cpu().numpy()  # 等权组合（旧逻辑）
+            target_oos = loader.target_ret[:, start:end]
+            suspended_oos = loader.raw_data_cache.get(
+                "suspended", torch.zeros_like(target_oos, dtype=torch.bool)
+            )
+            constituent_oos = loader.raw_data_cache.get(
+                "constituent", torch.ones_like(target_oos, dtype=torch.bool)
+            )
+            valid_mask = ~(torch.isnan(target_oos) | suspended_oos) & constituent_oos
+            valid_target = torch.where(valid_mask, target_oos, 0.0)
+            valid_count = valid_mask.float().sum(dim=0).clamp(min=1)
+            bench_daily = (valid_target.sum(dim=0) / valid_count).cpu().numpy()
 
         # 统计
         metrics = self._compute_metrics(daily_ret, bench_daily, turnover, T, oos_dates)
