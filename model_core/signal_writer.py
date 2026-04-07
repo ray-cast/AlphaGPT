@@ -14,13 +14,13 @@ class SignalWriter:
     def __init__(self, loader):
         """
         Args:
-            loader: AshareDataLoader 实例（含 stock_codes, dates, test_idx, raw_data_cache）
+            loader: AshareDataLoader 实例（含 stock_codes, dates, test_start, raw_data_cache）
         """
         self.loader = loader
         self.stock_codes = loader.stock_codes
         self.dates = loader.dates
-        self.train_idx = loader.train_idx
-        self.test_idx = loader.test_idx
+        self.test_start = loader.test_start
+        self.test_end = loader.test_end
 
         # 预计算市场趋势指标（close / MA60 - 1，经 tanh 压缩）
         close = loader.raw_data_cache["close"]  # [num_stocks, T]
@@ -47,7 +47,7 @@ class SignalWriter:
         os.makedirs(output_dir, exist_ok=True)
 
         # 输出测试集及以后的信号
-        val_start = self.train_idx
+        val_start = self.test_start
         val_dates = self.dates[val_start:]
         alpha_val = alpha_values[:, val_start:]
         trend_val = self.market_trend[val_start:]

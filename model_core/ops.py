@@ -263,4 +263,11 @@ OPS_CONFIG = [
     ('TS_ARGMAX5', lambda x: _ts_argmax(x, 5), 1),
     ('TS_DELAY5', lambda x: _ts_delay(x, 5), 1),
     ('TS_MEAN5', lambda x: _ts_mean(x, 5), 1),
+    # ---- 时序算子（60日窗口：中长期趋势） ----
+    ('TS_RANK60', lambda x: _ts_rank(x, 60), 1),
+    ('TS_DECAY60', lambda x: _ts_decay_linear(x, 60), 1),
+    ('TS_STD60', lambda x: _ts_std(x, 60), 1),
+    ('TS_CORR60', lambda x, y: _ts_corr(x, y, 60), 2),
+    ('TS_MEAN60', lambda x: _ts_mean(x, 60), 1),
+    ('TS_DELTA60', lambda x: _ts_delta(x, 60), 1),
 ]

@@ -180,7 +180,7 @@ class TushareDownloader:
                 ts_code=ts_code,
                 start_date=actual_start,
                 end_date=end_date,
-                fields="ts_code,trade_date,turnover_rate,pe_ttm,pb"
+                fields="ts_code,trade_date,turnover_rate,pe_ttm,pb,total_mv"
             )
             if not basic.empty:
                 basic["trade_date"] = basic["trade_date"].astype(str)

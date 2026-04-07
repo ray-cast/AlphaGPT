@@ -57,9 +57,10 @@ class AlphaEngine:
         self.patience_counter = 0
         self.patience_limit = ModelConfig.PATIENCE_LIMIT
         self.bt = AshareBacktest()
-        self.valid_idx = self.loader.valid_idx
-        self.train_idx = self.loader.train_idx
-        self.test_idx = self.loader.test_idx
+        self.train_start = self.loader.train_start
+        self.train_end = self.loader.train_end
+        self.test_start = self.loader.test_start
+        self.test_end = self.loader.test_end
 
         # 预计算 arity 张量，供 rollout 和 _evaluate_sequences 共用
         feat_count = len(self.model.features_list)
@@ -252,7 +253,7 @@ class AlphaEngine:
 
                 score, ret_val, _, _ = self.bt.evaluate(
                     res, self.loader.raw_data_cache, self.loader.target_ret,
-                    start_idx=self.valid_idx, end_idx=self.train_idx
+                    start_idx=self.train_start, end_idx=self.train_end
                 )
 
                 unique_map[fkey] = (score.item(), ret_val)

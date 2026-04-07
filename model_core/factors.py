@@ -309,11 +309,38 @@ class Indicators:
         down_sum = _rolling_sum(down, window)
         return 100.0 * (up_sum - down_sum) / (up_sum + down_sum + 1e-9)
 
+    @staticmethod
+    def log_mcap(total_mv):
+        """对数总市值（截面规模因子）。total_mv 单位：万元。"""
+        if total_mv is None:
+            return None
+        return torch.log(total_mv.clamp(min=1.0))
+
+    @staticmethod
+    def illiq(close, amount, window=20):
+        """Amihud 非流动性因子：日均绝对收益 / 成交额。
+        值越大说明流动性越差，单位价格变动需要的成交额越大。
+        """
+        ret = (close - torch.roll(close, 1, dims=1)) / (torch.roll(close, 1, dims=1) + 1e-9)
+        ret[:, 0] = 0.0
+        abs_ret = ret.abs()
+        # 滚动均值：日均绝对收益 / 日均成交额
+        mean_abs_ret = _rolling_mean(abs_ret, window)
+        mean_amount = _rolling_mean(amount, window)
+        return mean_abs_ret / (mean_amount + 1e-9)
+
+    @staticmethod
+    def adv(amount, window=20):
+        """N 日均成交额（流动性基准）。"""
+        return _rolling_mean(amount, window)
+
+
 class FeatureEngineer:
     FEATURES = [
         'RET', 'RET5', 'VOL_CHG', 'AMT_RATIO', 'TURN', 'PRESSURE', 'DEV',
         'RSI', 'TREND', 'HL_RANGE', 'CLOSE_POS', 'P_VALUE', 'VOL_CLUSTER',
         'ATR14', 'MFI14', 'MACD', 'BB_WIDTH', 'WILLR', 'OBV', 'CMO14',
+        'LOG_MCAP', 'ILLIQ', 'ADV20',
     ]
     INPUT_DIM = len(FEATURES)
 
@@ -358,6 +385,15 @@ class FeatureEngineer:
         obv_val = Indicators.obv(c, v)
         cmo14 = Indicators.cmo(c, 14)
 
+        # ---- 新增 3 维因子（规模/流动性） ----
+        log_mcap = Indicators.log_mcap(raw_dict.get("total_mv"))
+        illiq = Indicators.illiq(c, amt, 20)
+        adv20 = Indicators.adv(amt, 20)
+
+        # 对数市值：无数据时用零张量（截面排名无意义但不影响其他因子）
+        if log_mcap is None:
+            log_mcap = torch.zeros_like(c)
+
         features = torch.stack([
             robust_norm(ret),          # [0]  RET
             robust_norm(ret5),         # [1]  RET5
@@ -379,6 +415,9 @@ class FeatureEngineer:
             robust_norm(willr_val),    # [17] WILLR
             robust_norm(obv_val),      # [18] OBV
             robust_norm(cmo14),        # [19] CMO14
+            robust_norm(log_mcap),     # [20] LOG_MCAP
+            robust_norm(illiq),        # [21] ILLIQ
+            robust_norm(adv20),        # [22] ADV20
         ], dim=1)
 
         # 清理 Inf（但保留 NaN 标记停牌日）

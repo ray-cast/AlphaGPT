@@ -29,11 +29,11 @@ class StrategyReport:
         """
         loader = self.loader
         if split_type == "test":
-            start = loader.train_idx
-            end = loader.test_idx
+            start = loader.test_start
+            end = loader.test_end
         else:  # "val" = 验证集 (17-18)
-            start = 0
-            end = loader.valid_idx
+            start = loader.valid_start
+            end = loader.valid_end
 
         oos_dates = loader.dates[start:end]
         T = len(oos_dates)

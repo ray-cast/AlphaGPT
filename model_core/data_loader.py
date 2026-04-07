@@ -96,9 +96,12 @@ class AshareDataLoader:
         self.target_ret = None         # [num_stocks, T]
         self.stock_codes = []          # list[str]
         self.dates = None              # pd.DatetimeIndex
-        self.valid_idx = None          # 验证集截止索引（不含）
-        self.train_idx = None          # 训练集截止索引（不含）
-        self.test_idx = None           # 测试集截止索引（不含）
+        self.valid_start = None        # 验证集起始索引（含）
+        self.valid_end = None          # 验证集截止索引（不含）= 训练集起始
+        self.train_start = None        # 训练集起始索引（含）= valid_end
+        self.train_end = None          # 训练集截止索引（不含）= 测试集起始
+        self.test_start = None         # 测试集起始索引（含）= train_end
+        self.test_end = None           # 测试集截止索引（不含）
         self.benchmark_ret = None      # [T] 基准指数日收益率
         self.nan_mask = None           # [N, T] bool
         self.clean_feat_tensor = None  # [num_stocks, N_features, T]
@@ -312,6 +315,8 @@ class AshareDataLoader:
             self.raw_data_cache["pe_ttm"] = to_tensor("pe_ttm")
         if "pb" in master.columns:
             self.raw_data_cache["pb"] = to_tensor("pb")
+        if "total_mv" in master.columns:
+            self.raw_data_cache["total_mv"] = to_tensor("total_mv")
         pe_ttm_t = self.raw_data_cache.get("pe_ttm")
         pb_t = self.raw_data_cache.get("pb")
         if pe_ttm_t is not None and pb_t is not None:
@@ -411,36 +416,41 @@ class AshareDataLoader:
         self.target_ret = self.target_ret.clamp(-0.25, 0.25)
 
         # 12. 验证/训练/测试三集切分
-        self.valid_idx = 0
-        self.train_idx = 0
-        self.test_idx = 0
-        valid_end = int(ModelConfig.VALID_END_DATE)
-        train_end = int(ModelConfig.TRAIN_END_DATE)
-        test_end = int(ModelConfig.TEST_END_DATE)
+        #    每个区间为半开区间 [start, end)
+        self.valid_start = 0
+        self.valid_end = 0
+        self.train_end = 0
+        self.test_end = 0
+        _valid_end = int(ModelConfig.VALID_END_DATE)
+        _train_end = int(ModelConfig.TRAIN_END_DATE)
+        _test_end = int(ModelConfig.TEST_END_DATE)
         for i, d in enumerate(self.dates):
             d_int = int(d)
-            if d_int <= valid_end:
-                self.valid_idx = i + 1
-            if d_int <= train_end:
-                self.train_idx = i + 1
-            if d_int <= test_end:
-                self.test_idx = i + 1
+            if d_int <= _valid_end:
+                self.valid_end = i + 1
+            if d_int <= _train_end:
+                self.train_end = i + 1
+            if d_int <= _test_end:
+                self.test_end = i + 1
+
+        self.train_start = self.valid_end
+        self.test_start = self.train_end
 
         # 边界校验
         T = len(self.dates)
-        if self.valid_idx < 20:
+        if self.valid_end < 20:
             raise ValueError(
-                f"验证集不足 20 个交易日（仅 {self.valid_idx} 天），"
+                f"验证集不足 20 个交易日（仅 {self.valid_end} 天），"
                 f"请检查 DATA_START_DATE / VALID_END_DATE 配置或数据完整性"
             )
-        if self.train_idx <= self.valid_idx:
+        if self.train_end <= self.valid_end:
             raise ValueError(
-                f"训练集为空（valid_idx={self.valid_idx}, train_idx={self.train_idx}），"
+                f"训练集为空（valid_end={self.valid_end}, train_end={self.train_end}），"
                 f"请检查 VALID_END_DATE / TRAIN_END_DATE 配置或数据完整性"
             )
-        if self.test_idx <= self.train_idx:
+        if self.test_end <= self.train_end:
             raise ValueError(
-                f"测试集为空（train_idx={self.train_idx}, test_idx={self.test_idx}），"
+                f"测试集为空（train_end={self.train_end}, test_end={self.test_end}），"
                 f"请检查 TRAIN_END_DATE / TEST_END_DATE 配置或数据完整性"
             )
 
@@ -449,9 +459,9 @@ class AshareDataLoader:
         ipo_ok_pct = ipo_mask.float().mean() * 100 if ipo_mask is not None else 0.0
         print(f"数据加载完成: {N} 只股票, {T} 个交易日, {self.feat_tensor.shape[1]} 个因子")
         print(f"  次新股掩码: 平均 {ipo_ok_pct:.1f}% 的股票-日通过（上市≥{ModelConfig.IPO_MIN_DAYS}天）")
-        print(f"  验证集: {self.dates[0]} ~ {self.dates[self.valid_idx-1]} ({self.valid_idx} 天)")
-        print(f"  训练集: {self.dates[self.valid_idx]} ~ {self.dates[self.train_idx-1]} ({self.train_idx - self.valid_idx} 天)")
-        print(f"  测试集: {self.dates[self.train_idx]} ~ {self.dates[self.test_idx-1]} ({self.test_idx - self.train_idx} 天)")
+        print(f"  验证集: {self.dates[self.valid_start]} ~ {self.dates[self.valid_end-1]} ({self.valid_end - self.valid_start} 天)")
+        print(f"  训练集: {self.dates[self.train_start]} ~ {self.dates[self.train_end-1]} ({self.train_end - self.train_start} 天)")
+        print(f"  测试集: {self.dates[self.test_start]} ~ {self.dates[self.test_end-1]} ({self.test_end - self.test_start} 天)")
         print(f"  基准指数: {ModelConfig.BENCHMARK_INDEX}"
               f"{'（已加载）' if self.benchmark_ret is not None else '（未加载，使用等权基准）'}")
 
