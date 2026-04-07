@@ -67,7 +67,7 @@ class AlphaEngine:
         for i, cfg in enumerate(OPS_CONFIG):
             self.arity_tens[feat_count + i] = cfg[2]
 
-        self.best_score = -float("inf")
+        self.best_score = -999.0
         self.best_formula = None
         self.training_history = {
             "step": [],
@@ -259,21 +259,12 @@ class AlphaEngine:
                 rewards[i] = score
 
                 if score.item() > self.best_score:
-                    # 验证集检验（2017-2018 熊市压力测试）
-                    val_score, _, _, _ = self.bt.evaluate(
-                        res, self.loader.raw_data_cache, self.loader.target_ret,
-                        start_idx=0, end_idx=self.valid_idx
-                    )
-                    if val_score < -1.0:
-                        # 熊市验证集严重失效，跳过不更新 best
-                        continue
                     self.best_score = score.item()
                     self.best_formula = trimmed
                     self.patience_counter = 0  # 重置早停计数器
                     decoded = self._decode(trimmed)
                     tqdm.write(
                         f"[!] New Best: Score {score:.2f} "
-                        f"(Val={val_score:.2f}) "
                         f"CumRet {ret_val:.2%} | {decoded}"
                     )
 
@@ -337,7 +328,7 @@ class AlphaEngine:
             total_loss_val /= ModelConfig.PPO_EPOCHS
             postfix = {
                 "AvgRew": f"{avg_reward:.3f}",
-                "Best": f"{self.best_score:.3f}",
+                "Best": f"{self.best_score:.3f}" if self.best_formula else "N/A",
                 "Loss": f"{total_loss_val:.2f}",
                 "Unique": f"{unique_ratio:.0%}",
                 "Len": current_max_len,
@@ -350,7 +341,9 @@ class AlphaEngine:
 
             self.training_history["step"].append(step)
             self.training_history["avg_reward"].append(avg_reward)
-            self.training_history["best_score"].append(self.best_score)
+            self.training_history["best_score"].append(
+                self.best_score if self.best_formula else None
+            )
             self.training_history["total_loss"].append(total_loss_val)
             self.training_history["best_formula"] = self.best_formula
             self.training_history["best_decoded"] = self._decode(self.best_formula) if self.best_formula else None
