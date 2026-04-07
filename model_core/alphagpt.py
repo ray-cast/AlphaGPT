@@ -46,7 +46,7 @@ class NewtonSchulzLowRankDecay:
                 X = X.T
                 transposed = True
             
-            # Normalize by Frobenius norm (≥ spectral norm, safe for convergence)
+            # Normalize by spectral norm
             norm = X.norm() + 1e-8
             X = X / norm
             
@@ -63,8 +63,8 @@ class NewtonSchulzLowRankDecay:
             if transposed:
                 Y = Y.T
             
-            # Boost orthogonal component to prevent rank collapse
-            W.add_(self.decay_rate * Y.to(orig_dtype))
+            # Apply low-rank decay
+            W.sub_(self.decay_rate * Y.to(orig_dtype))
 
 
 class StableRankMonitor:
