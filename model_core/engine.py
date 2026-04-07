@@ -99,17 +99,6 @@ class AlphaEngine:
         seeds = [s for s in seeds if len(s) <= max_len]
         return seeds
 
-    def _get_curriculum_max_len(self, step):
-        """根据课程学习计划返回当前步数的公式最大长度。"""
-        schedule = ModelConfig.CURRICULUM_SCHEDULE
-        if schedule is None:
-            return ModelConfig.MAX_FORMULA_LEN
-        max_len = ModelConfig.MAX_FORMULA_LEN
-        for threshold, length in schedule:
-            if step >= threshold:
-                max_len = length
-        return min(max_len, ModelConfig.MAX_FORMULA_LEN)
-
     def _get_strict_mask(self, open_slots, step, max_len=None):
         """严格 Action Masking：确保生成合法的前缀表达式树。"""
         if max_len is None:
@@ -189,8 +178,7 @@ class AlphaEngine:
     def train(self):
         lord_info = " (LoRD)" if self.use_lord else ""
         sft_info = f" (SFT {self.sft_steps} steps)" if self.seed_formulas else ""
-        curriculum_info = " (Curriculum)" if ModelConfig.CURRICULUM_SCHEDULE else ""
-        print(f"开始沪深300 Alpha Mining{lord_info}{sft_info}{curriculum_info}...")
+        print(f"开始沪深300 Alpha Mining{lord_info}{sft_info}...")
 
         # ========== SFT 预训练：从已知好公式热启动 ==========
         if self.seed_formulas:
@@ -204,14 +192,8 @@ class AlphaEngine:
         for i, cfg in enumerate(OPS_CONFIG):
             arity_map[feat_count + i] = cfg[2]
 
-        prev_max_len = None
         for step in pbar:
-            # 课程学习：获取当前最大公式长度
-            current_max_len = self._get_curriculum_max_len(step)
-            if prev_max_len is not None and current_max_len != prev_max_len:
-                tqdm.write(f"[Curriculum] MAX_LEN {prev_max_len} → {current_max_len} at step {step}")
-                self.patience_counter = 0  # 新搜索空间需要探索时间
-            prev_max_len = current_max_len
+            current_max_len = ModelConfig.MAX_FORMULA_LEN
 
             bs = ModelConfig.BATCH_SIZE
 
