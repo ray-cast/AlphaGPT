@@ -7,6 +7,14 @@ from .config import ModelConfig
 from .factors import FeatureEngineer
 
 
+def _limit_pct_for_code(code: str) -> float:
+    """从股票代码前缀推断涨跌停百分比。"""
+    c = code.split(".")[0]
+    if c.startswith("300") or c.startswith("301") or c.startswith("688"):
+        return ModelConfig.PRICE_LIMIT_GEM   # 0.20
+    return ModelConfig.PRICE_LIMIT_MAIN       # 0.10
+
+
 class AshareDataLoader:
     """从 CSV 文件加载沪深300成分股日线数据，转为 PyTorch tensors。"""
 
@@ -134,6 +142,36 @@ class AshareDataLoader:
         pb_t = self.raw_data_cache.get("pb")
         if pe_ttm_t is not None and pb_t is not None:
             self.raw_data_cache["roe"] = pb_t / pe_ttm_t
+
+        # 4.4 涨跌停掩码
+        if "pre_close" in master.columns:
+            pre_close_pivot = master.pivot(index="trade_date", columns="ts_code", values="pre_close")
+            pre_close_pivot = pre_close_pivot.sort_index()
+            pre_close_pivot = pre_close_pivot[[c for c in loaded_codes if c in pre_close_pivot.columns]]
+            pre_close_t = torch.tensor(
+                pre_close_pivot.values.T, dtype=torch.float32, device=ModelConfig.DEVICE
+            )
+        else:
+            # 回退：pre_close ≈ close[t-1]
+            close_t = self.raw_data_cache["close"]
+            pre_close_t = torch.zeros_like(close_t)
+            pre_close_t[:, 1:] = close_t[:, :-1]
+            pre_close_t[:, 0] = close_t[:, 0]
+
+        close_t = self.raw_data_cache["close"]
+        pct_change = (close_t - pre_close_t) / (pre_close_t.abs() + 1e-8)
+        thresholds = torch.tensor(
+            [_limit_pct_for_code(code) for code in loaded_codes],
+            dtype=torch.float32, device=ModelConfig.DEVICE,
+        ).unsqueeze(1)  # [N, 1]
+        limit_up = pct_change >= (thresholds - 0.005)
+        limit_down = pct_change <= (-thresholds + 0.005)
+        limit_up[:, 0] = False
+        limit_down[:, 0] = False
+        limit_up[suspended_mask] = False
+        limit_down[suspended_mask] = False
+        self.raw_data_cache["limit_up"] = limit_up
+        self.raw_data_cache["limit_down"] = limit_down
 
         self.dates = sorted(master["trade_date"].unique())
 

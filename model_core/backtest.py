@@ -38,6 +38,8 @@ class AshareBacktest:
                             torch.ones_like(factors, dtype=torch.bool))
         pe_ttm_full = raw_data.get("pe_ttm")
         roe_full = raw_data.get("roe")
+        limit_up_full = raw_data.get("limit_up")
+        limit_down_full = raw_data.get("limit_down")
 
         # 按指定区间切片
         factors = factors[:, start_idx:end_idx]
@@ -47,6 +49,8 @@ class AshareBacktest:
         constituent = constituent[:, start_idx:end_idx]
         pe_ttm = pe_ttm_full[:, start_idx:end_idx] if pe_ttm_full is not None else None
         roe = roe_full[:, start_idx:end_idx] if roe_full is not None else None
+        limit_up = limit_up_full[:, start_idx:end_idx] if limit_up_full is not None else None
+        limit_down = limit_down_full[:, start_idx:end_idx] if limit_down_full is not None else None
 
         N_stocks, T_len = factors.shape
 
@@ -58,6 +62,10 @@ class AshareBacktest:
         # 基本面过滤（训练用 soft penalty，保留探索空间）
         apply_fundamental_filter(scores, pe_ttm, roe, soft=True)
 
+        # 涨停过滤：涨停股票无法买入，从候选池排除
+        if limit_up is not None:
+            scores[limit_up] = float('-inf')
+
         # 市场状态判断：等权组合收益的 20 日均线（排除停牌）
         valid_target = torch.where(valid_mask, target_ret, 0.0)
         valid_count = valid_mask.float().sum(dim=0).clamp(min=1)
@@ -66,7 +74,8 @@ class AshareBacktest:
 
         # 构建持仓矩阵
         rank_gap = ModelConfig.REBALANCE_RANK_GAP
-        position = self._build_position(scores, valid_mask, self.top_n, rank_gap, self.rebalance_freq)
+        position = self._build_position(scores, valid_mask, self.top_n, rank_gap, self.rebalance_freq,
+                                        limit_down=limit_down)
 
         # 熊市缩仓：MA20<0 时统一缩减到 75%
         bear_mask = market_ma20 < 0
@@ -125,7 +134,7 @@ class AshareBacktest:
         return fitness, cum_ret.item(), daily_pnl, turnover
 
     @staticmethod
-    def _build_position(scores, valid_mask, top_n, rank_gap, rebalance_freq=20):
+    def _build_position(scores, valid_mask, top_n, rank_gap, rebalance_freq=20, limit_down=None):
         """构建持仓矩阵，引入再平衡周期和换手惩罚阈值。
 
         每 rebalance_freq 个交易日执行一次截面选股（再平衡），
@@ -141,6 +150,7 @@ class AshareBacktest:
             top_n:         持仓数量
             rank_gap:      换仓排名阈值（0 = 每日完全重选，即关闭阈值）
             rebalance_freq: 再平衡周期（交易日），1 = 每日再平衡
+            limit_down:    [N_stocks, T] bool 跌停掩码，跌停持仓不可被替换（卖出）
         Returns:
             position:   [N_stocks, T] 持仓矩阵（0/1）
         """
@@ -166,6 +176,9 @@ class AshareBacktest:
         ranks_np = np.zeros_like(sorted_idx_np, dtype=np.int64)
         rank_pos_np = np.arange(N_stocks, dtype=np.int64)[:, np.newaxis]
         ranks_np[sorted_idx_np, np.arange(T_len)] = rank_pos_np
+
+        # 跌停掩码转 numpy
+        limit_down_np = limit_down.cpu().numpy() if limit_down is not None else None
 
         # numpy topk（按天取前 k 名，按分数降序排列）
         k = min(top_n * 2, N_stocks)
@@ -202,8 +215,12 @@ class AshareBacktest:
                 today_ranks = ranks_np[:, t]
 
                 held_indices = np.where(held_mask)[0]
-                # 找当前最弱持仓（排名最大 = 最差）
+                # 找当前最弱持仓（排名最大 = 最差），跌停持仓不可被替换
                 held_ranks = today_ranks[held_indices]
+                if limit_down_np is not None:
+                    held_blocked = limit_down_np[:, t][held_indices]
+                    held_ranks = held_ranks.copy()
+                    held_ranks[held_blocked] = -1  # 屏蔽：确保不被 argmax 选中
                 weakest_pos = int(np.argmax(held_ranks))
                 weakest_idx = held_indices[weakest_pos]
                 weakest_rank = int(today_ranks[weakest_idx])
@@ -216,9 +233,13 @@ class AshareBacktest:
                         # 换仓
                         held_mask[weakest_idx] = False
                         held_mask[cand_idx] = True
-                        # 重新找最弱
+                        # 重新找最弱（跌停保护）
                         held_indices = np.where(held_mask)[0]
                         held_ranks = today_ranks[held_indices]
+                        if limit_down_np is not None:
+                            held_blocked = limit_down_np[:, t][held_indices]
+                            held_ranks = held_ranks.copy()
+                            held_ranks[held_blocked] = -1
                         weakest_pos = int(np.argmax(held_ranks))
                         weakest_idx = held_indices[weakest_pos]
                         weakest_rank = int(today_ranks[weakest_idx])
