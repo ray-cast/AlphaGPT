@@ -82,7 +82,11 @@ def _limit_pct_for_code(code: str) -> float:
 
 
 class AshareDataLoader:
-    """从 CSV 文件加载全市场A股日线数据，转为 PyTorch tensors。"""
+    """从 CSV 文件加载全市场A股日线数据，转为 PyTorch tensors。
+
+    首次加载后自动缓存为 .pt 文件，后续加载直接读缓存（快 ~50-100x）。
+    CSV 文件有更新时缓存自动失效。
+    """
 
     def __init__(self, data_dir: str = None, max_stocks: int = 3000):
         self.data_dir = data_dir or ModelConfig.DATA_DIR
@@ -96,6 +100,67 @@ class AshareDataLoader:
         self.train_idx = None          # 训练集截止索引（不含）
         self.test_idx = None           # 测试集截止索引（不含）
         self.benchmark_ret = None      # [T] 基准指数日收益率
+        self.nan_mask = None           # [N, T] bool
+        self.clean_feat_tensor = None  # [num_stocks, N_features, T]
+
+    # ------------------------------------------------------------------
+    #  缓存管理
+    # ------------------------------------------------------------------
+
+    def _cache_path(self) -> str:
+        return os.path.join(self.data_dir, ".tensor_cache.pt")
+
+    def _cache_is_valid(self) -> bool:
+        """缓存文件存在且比所有 CSV 文件都新。"""
+        cp = self._cache_path()
+        if not os.path.exists(cp):
+            return False
+        cache_mtime = os.path.getmtime(cp)
+        daily_dir = os.path.join(self.data_dir, "daily")
+        for f in os.listdir(daily_dir):
+            if f.endswith(".csv"):
+                if os.path.getmtime(os.path.join(daily_dir, f)) > cache_mtime:
+                    return False
+        # constituents 目录也要检查
+        const_dir = os.path.join(self.data_dir, "constituents")
+        if os.path.isdir(const_dir):
+            for f in os.listdir(const_dir):
+                if f.endswith(".csv"):
+                    if os.path.getmtime(os.path.join(const_dir, f)) > cache_mtime:
+                        return False
+        return True
+
+    def _save_cache(self):
+        """将原始 tensors 保存到缓存文件（不含因子/收益，因子每次重算）。"""
+        cache = {
+            "raw_data_cache": self.raw_data_cache,
+            "stock_codes": self.stock_codes,
+            "dates": self.dates,
+            "benchmark_ret": self.benchmark_ret,
+            "max_stocks": self.max_stocks,
+        }
+        torch.save(cache, self._cache_path())
+        print("  原始数据缓存已保存，后续加载将跳过 CSV 解析")
+
+    def _load_cache(self) -> bool:
+        """尝试从缓存加载原始 tensors，成功返回 True。"""
+        if not self._cache_is_valid():
+            return False
+        print("从缓存加载原始数据...")
+        import time
+        t0 = time.time()
+        cache = torch.load(self._cache_path(), weights_only=False, map_location=ModelConfig.DEVICE)
+        if cache.get("max_stocks") != self.max_stocks:
+            print("  max_stocks 变化，缓存失效")
+            return False
+        self.raw_data_cache = cache["raw_data_cache"]
+        self.stock_codes = cache["stock_codes"]
+        self.dates = cache["dates"]
+        self.benchmark_ret = cache["benchmark_ret"]
+        elapsed = time.time() - t0
+        N, T = self.raw_data_cache["close"].shape
+        print(f"  缓存加载耗时: {elapsed:.1f}s ({N} 只股票, {T} 个交易日)")
+        return True
 
     def _load_stock_basic(self) -> pd.DataFrame:
         """加载股票基本信息（上市日期、名称），用于过滤。"""
@@ -147,6 +212,16 @@ class AshareDataLoader:
         return codes, list_dates
 
     def load_data(self):
+        # ── 第一阶段：加载原始 tensors（缓存 或 CSV）──
+        if not self._load_cache():
+            self._load_from_csv()
+            self._save_cache()
+
+        # ── 第二阶段：因子 / 收益 / 切分（每次重算）──
+        self._compute_derived()
+
+    def _load_from_csv(self):
+        """从 CSV 文件读取并转为原始 tensors（耗时步骤，可缓存）。"""
         print("从 CSV 加载全市场A股数据...")
 
         # 1. 加载股票基本信息（用于过滤）
@@ -223,7 +298,6 @@ class AshareDataLoader:
         else:
             print("[WARN] 数据中无 turnover_rate 列，用成交量代理计算换手率")
             T = self.raw_data_cache["close"].shape[1]
-            N = self.raw_data_cache["close"].shape[0]
             vol = self.raw_data_cache["vol"]
             vol_ma20 = torch.zeros_like(vol)
             if T >= 20:
@@ -308,13 +382,14 @@ class AshareDataLoader:
         self.raw_data_cache["stamp_tax_rate"] = stamp_tax  # [T]
 
         # 8. 构建次新股掩码（替代原成分股掩码，消除新股影响）
-        N, T = self.raw_data_cache["close"].shape
         ipo_mask = build_ipo_mask(loaded_codes, list_dates, self.dates)
         self.raw_data_cache["ipo_ok"] = ipo_mask  # [N, T] True=已上市足够久
 
         # 9. 加载基准指数日收益率
         self._load_benchmark_returns()
 
+    def _compute_derived(self):
+        """从原始 tensors 计算因子、收益率、数据集切分（每次重算）。"""
         # 10. 计算因子
         self.feat_tensor = FeatureEngineer.compute_features(self.raw_data_cache)
 
@@ -370,7 +445,8 @@ class AshareDataLoader:
             )
 
         N, T = self.raw_data_cache["close"].shape
-        ipo_ok_pct = ipo_mask.float().mean() * 100
+        ipo_mask = self.raw_data_cache.get("ipo_ok")
+        ipo_ok_pct = ipo_mask.float().mean() * 100 if ipo_mask is not None else 0.0
         print(f"数据加载完成: {N} 只股票, {T} 个交易日, {self.feat_tensor.shape[1]} 个因子")
         print(f"  次新股掩码: 平均 {ipo_ok_pct:.1f}% 的股票-日通过（上市≥{ModelConfig.IPO_MIN_DAYS}天）")
         print(f"  验证集: {self.dates[0]} ~ {self.dates[self.valid_idx-1]} ({self.valid_idx} 天)")
