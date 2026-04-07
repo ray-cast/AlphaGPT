@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .config import ModelConfig
 from .ops import OPS_CONFIG
+from .factors import FeatureEngineer
 
 
 class NewtonSchulzLowRankDecay:
@@ -150,17 +151,22 @@ class MTPHead(nn.Module):
             nn.Linear(d_model // 2, num_tasks)
         )
     
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # x: [Batch, D_Model]
+
         # Route to appropriate task heads
         task_logits = self.task_router(x)
-        task_probs = F.softmax(task_logits, dim=-1)
-        
+        router_probs = F.softmax(task_logits, dim=-1)  # [Batch, NumTasks]
+        task_prior = F.softmax(self.task_weights, dim=0)  # [NumTasks]
+        task_probs = router_probs * task_prior.unsqueeze(0)
+        task_probs = task_probs / task_probs.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+
         # Compute all task outputs
         task_outputs = [head(x) for head in self.task_heads]
-        task_outputs = torch.stack(task_outputs, dim=1)  # [B, num_tasks, vocab_size]
-        
+        task_outputs = torch.stack(task_outputs, dim=1)  # [Batch, NumTasks, VocabSize]
+
         # Weighted combination
-        weighted = (task_probs.unsqueeze(-1) * task_outputs).sum(dim=1)
+        weighted = (task_probs.unsqueeze(-1) * task_outputs).sum(dim=1)  # [Batch, VocabSize]
         return weighted, task_probs
 
 
@@ -222,11 +228,12 @@ class AlphaGPT(nn.Module):
     def __init__(self):
         super().__init__()
         self.d_model = 64
-        self.features_list = ['RET', 'RET5', 'VOL_CHG', 'AMT_RATIO', 'TURN', 'PRESSURE', 'DEV', 'RSI', 'TREND', 'HL_RANGE', 'CLOSE_POS', 'P_VALUE', 'VOL_CLUSTER']
+        self.features_list = FeatureEngineer.FEATURES
         self.ops_list = [cfg[0] for cfg in OPS_CONFIG]
         
         self.vocab = self.features_list + self.ops_list
-        self.vocab_size = len(self.vocab)
+        self.bos_id = len(self.vocab)
+        self.vocab_size = len(self.vocab) + 1
         
         # Embedding
         self.token_emb = nn.Embedding(self.vocab_size, self.d_model)
