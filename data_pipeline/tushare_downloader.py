@@ -1,5 +1,5 @@
 """
-全A股（主板）数据下载脚本
+A股数据下载器（Tushare Pro）
 
 过滤规则:
     - 排除科创板 (688xxx)
@@ -7,39 +7,18 @@
     - 排除北交所 (8xxxxx)
     - 排除 ST/*ST 股票
     - 排除次新股（上市不足 250 个自然日）
-
-用法:
-    python data_download.py [--start 20150101] [--end 20260404]
-
-    Token 优先从 .env 文件读取 TUSHARE_TOKEN，也可通过 --token 参数覆盖。
-
-数据目录结构:
-    data/
-      constituents/
-        stock_basic.csv         # 全市场股票基本信息（含上市日期、名称）
-        benchmark_index.csv     # 基准指数日线（中证全指）
-      daily/
-        000001.SZ.csv          # 每只股票一个CSV文件
-        600519.SH.csv
-        ...
 """
 
 import os
-import sys
 import time
-import argparse
-import pandas as pd
 from datetime import datetime
-from dotenv import load_dotenv
+
+import pandas as pd
 
 try:
     import tushare as ts
 except ImportError:
-    print("请先安装 tushare: pip install tushare")
-    sys.exit(1)
-
-# 加载 .env 文件中的环境变量
-load_dotenv(override=True)
+    raise ImportError("请先安装 tushare: pip install tushare")
 
 
 class TushareDownloader:
@@ -55,10 +34,7 @@ class TushareDownloader:
     #  全市场股票列表
     # ------------------------------------------------------------------
     def fetch_stock_basic(self) -> pd.DataFrame:
-        """获取全A股股票基本信息，缓存到 CSV。
-
-        包含字段: ts_code, name, area, industry, market, list_date
-        """
+        """获取全A股股票基本信息，缓存到 CSV。"""
         cache_path = os.path.join(self.const_dir, "stock_basic.csv")
         if os.path.exists(cache_path):
             df = pd.read_csv(cache_path, dtype={"list_date": str})
@@ -83,24 +59,14 @@ class TushareDownloader:
         exclude_st: bool = True,
         ipo_min_days: int = 250,
     ) -> list[str]:
-        """获取过滤后的股票代码列表（用于下载）。
-
-        过滤规则:
-            - 科创板 (688xxx)
-            - 创业板 (300xxx, 301xxx)
-            - 北交所 (8xxxxx)
-            - ST/*ST 股票（按当前名称判断）
-            - 次新股（上市不足 ipo_min_days 个自然日）
-        """
+        """获取过滤后的股票代码列表。"""
         df = self.fetch_stock_basic()
         before = len(df)
 
-        # 提取纯代码前缀
         codes = df["ts_code"].str.split(".").str[0]
         names = df["name"].fillna("").str.upper()
         list_dates = df["list_date"].fillna("").astype(str)
 
-        # 板块过滤
         keep = pd.Series(True, index=df.index)
         if exclude_star:
             keep &= ~codes.str.startswith("688")
@@ -108,10 +74,8 @@ class TushareDownloader:
             keep &= ~codes.str.startswith("300") & ~codes.str.startswith("301")
         if exclude_bse:
             keep &= ~codes.str.startswith("8")
-        # ST 过滤
         if exclude_st:
             keep &= ~names.str.contains("ST")
-        # 次新股过滤
         valid_date = list_dates.str.len() == 8
         if ipo_min_days > 0:
             today = datetime.now()
@@ -129,7 +93,7 @@ class TushareDownloader:
     # ------------------------------------------------------------------
     def fetch_index_daily(self, start_date: str = "20160101", end_date: str = None,
                           index_code: str = "000985.SH"):
-        """下载指数日线行情，作为回测基准。默认中证全指。"""
+        """下载指数日线行情，作为回测基准。"""
         if end_date is None:
             end_date = time.strftime("%Y%m%d")
         cache_path = os.path.join(self.const_dir, "benchmark_index.csv")
@@ -184,21 +148,17 @@ class TushareDownloader:
         """获取单只股票日线数据，支持增量更新。"""
         csv_path = os.path.join(self.daily_dir, f"{ts_code}.csv")
 
-        # 增量逻辑：如果文件已存在，只获取新增数据
         actual_start = start_date
         append_mode = False
         if os.path.exists(csv_path):
             existing = pd.read_csv(csv_path, dtype={"trade_date": str})
             if not existing.empty:
                 last_date = str(existing["trade_date"].max())
-                # 从下一个交易日开始
                 actual_start = last_date
                 append_mode = True
-                # 如果数据已是最新则跳过
                 if last_date >= end_date:
                     return existing
 
-        # 获取日线行情
         try:
             daily = self.pro.daily(
                 ts_code=ts_code,
@@ -213,10 +173,8 @@ class TushareDownloader:
         if daily.empty:
             return pd.read_csv(csv_path) if os.path.exists(csv_path) else daily
 
-        # 统一 trade_date 为字符串，避免 merge 时 str/int 类型冲突
         daily["trade_date"] = daily["trade_date"].astype(str)
 
-        # 获取换手率 + 基本面指标（需要 daily_basic 接口）
         try:
             basic = self.pro.daily_basic(
                 ts_code=ts_code,
@@ -230,13 +188,11 @@ class TushareDownloader:
         except Exception:
             daily["turnover_rate"] = 0.0
 
-        # 确保 turnover_rate 列存在
         if "turnover_rate" not in daily.columns:
             daily["turnover_rate"] = 0.0
 
         daily = daily.sort_values("trade_date").reset_index(drop=True)
 
-        # 写文件
         if append_mode and os.path.exists(csv_path):
             existing = pd.read_csv(csv_path, dtype={"trade_date": str})
             combined = pd.concat([existing, daily], ignore_index=True)
@@ -266,7 +222,6 @@ class TushareDownloader:
         success, fail, skip = 0, 0, 0
         for i, code in enumerate(codes, 1):
             csv_path = os.path.join(self.daily_dir, f"{code}.csv")
-            # 增量：已存在且最新的跳过
             if os.path.exists(csv_path):
                 try:
                     existing = pd.read_csv(csv_path, dtype={"trade_date": str})
@@ -285,31 +240,7 @@ class TushareDownloader:
                 fail += 1
                 print(f"  [{i}/{total}] {code}: 失败 - {e}")
 
-            # Tushare 限频控制
             time.sleep(0.35)
 
         print(f"\n下载完成: 成功 {success}, 失败 {fail}, 跳过 {skip}")
         print(f"数据目录: {self.daily_dir}")
-
-
-def main():
-    parser = argparse.ArgumentParser(description="全A股（主板）数据下载")
-    parser.add_argument("--token", default=None, help="Tushare Pro API Token（默认从 .env 读取）")
-    parser.add_argument("--start", default="20150101", help="起始日期 (默认 20150101)")
-    parser.add_argument("--end", default=None, help="结束日期 (默认今天)")
-    parser.add_argument("--data-dir", default="data", help="数据存储目录 (默认 data)")
-    args = parser.parse_args()
-
-    token = args.token or os.getenv("TUSHARE_TOKEN", "")
-    if not token:
-        print("错误: 未提供 Tushare Token。请在 .env 中设置 TUSHARE_TOKEN 或使用 --token 参数")
-        sys.exit(1)
-
-    dl = TushareDownloader(token=token, data_dir=args.data_dir)
-    dl.fetch_stock_basic()
-    dl.fetch_index_daily(start_date=args.start, end_date=args.end)
-    dl.fetch_all(start_date=args.start, end_date=args.end)
-
-
-if __name__ == "__main__":
-    main()

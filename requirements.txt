@@ -23,7 +23,10 @@ python-dotenv>=1.0.0  # Load .env files
 loguru>=0.7.0         # Structured logging
 tqdm>=4.66.0          # Progress bars
 
-# ===== Optional (visualization, dashboard) =====
-# matplotlib>=3.7.0
+# ===== Visualization =====
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# ===== Optional (dashboard) =====
 # streamlit>=1.28.0
 # plotly>=5.17.0

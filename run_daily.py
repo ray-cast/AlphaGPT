@@ -13,6 +13,9 @@ A股每日策略运行器
 
     # 跳过数据更新，直接训练+信号
     python run_daily.py --skip-update
+
+    # 自定义日期范围（仅数据更新阶段生效）
+    python run_daily.py --start 20150101 --end 20260404 --data-dir data
 """
 
 import os
@@ -27,22 +30,23 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-def update_data(token: str, data_dir: str):
+def update_data(token: str, data_dir: str, start_date: str = "20150101", end_date: str = None):
     """增量更新 Tushare 数据。"""
-    from data_download import TushareDownloader
+    from data_pipeline.tushare_downloader import TushareDownloader
+
+    if end_date is None:
+        end_date = datetime.now().strftime("%Y%m%d")
 
     dl = TushareDownloader(token=token, data_dir=data_dir)
-
-    today = datetime.now().strftime("%Y%m%d")
 
     print("[1/3] 获取全市场股票列表...")
     dl.fetch_stock_basic()
 
     print("[2/3] 下载中证全指基准数据...")
-    dl.fetch_index_daily(start_date="20150101", end_date=today)
+    dl.fetch_index_daily(start_date=start_date, end_date=end_date)
 
     print("[3/3] 增量更新全市场日线数据...")
-    dl.fetch_all(start_date="20150101", end_date=today)
+    dl.fetch_all(start_date=start_date, end_date=end_date)
 
     print("数据更新完成。")
 
@@ -199,16 +203,24 @@ def main():
                         help="用已有公式直接生成信号，跳过训练")
     parser.add_argument("--skip-update", action="store_true",
                         help="跳过数据更新，直接训练")
+    parser.add_argument("--token", default=None,
+                        help="Tushare Pro API Token（默认从 .env 读取）")
+    parser.add_argument("--start", default="20150101",
+                        help="数据起始日期 (默认 20150101)")
+    parser.add_argument("--end", default=None,
+                        help="数据结束日期 (默认今天)")
+    parser.add_argument("--data-dir", default="data",
+                        help="数据存储目录 (默认 data)")
     args = parser.parse_args()
 
-    token = os.getenv("TUSHARE_TOKEN", "")
+    token = args.token or os.getenv("TUSHARE_TOKEN", "")
     if not token and not args.skip_update and not args.signal_only:
         print("错误: .env 中未设置 TUSHARE_TOKEN")
         sys.exit(1)
 
     # ---- 数据更新 ----
     if not args.skip_update and not args.signal_only:
-        update_data(token, "data")
+        update_data(token, args.data_dir, start_date=args.start, end_date=args.end)
 
     if args.update_only:
         print("\n数据更新完成，退出。")
