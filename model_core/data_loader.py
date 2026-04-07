@@ -363,6 +363,34 @@ class AshareDataLoader:
         self.raw_data_cache["limit_up"] = limit_up
         self.raw_data_cache["limit_down"] = limit_down
 
+        # 6.5 后复权：用 pct_chg 构造除权除息不变的调整价格
+        #     adj_close[t] = close[0] * cumprod(1 + pct_chg/100)
+        #     adj_open/high/low = adj_close * (x / close)  日内比率不受除权影响
+        #     必须在涨跌停检测之后执行（涨跌停依赖原始价格）
+        if "pct_chg" in master.columns:
+            pct_chg_t = to_tensor("pct_chg") / 100.0          # [N, T] 日收益率
+            close_raw = self.raw_data_cache["close"]           # [N, T]（已 ffill）
+            # to_tensor 做了 ffill，停牌日的 pct_chg/close 不是 NaN 而是前值，
+            # 必须用 suspended_mask 显式跳过，否则停牌日会错误增长
+            skip = torch.isnan(pct_chg_t) | torch.isnan(close_raw) | suspended_mask
+            ret_safe = torch.where(skip, torch.zeros_like(pct_chg_t), pct_chg_t)
+            growth = 1.0 + ret_safe
+            growth[:, 0] = 1.0                                 # 首日为基线
+            cum_growth = torch.cumprod(growth, dim=1)          # [N, T]
+            adj_close = close_raw[:, 0:1] * cum_growth         # 后复权收盘价
+            # 用日内比率推导 adj_open/high/low
+            adj_open  = adj_close * (self.raw_data_cache["open"]  / (close_raw + 1e-9))
+            adj_high  = adj_close * (self.raw_data_cache["high"]  / (close_raw + 1e-9))
+            adj_low   = adj_close * (self.raw_data_cache["low"]   / (close_raw + 1e-9))
+            # 停牌日保留 ffill 值（维持 MA/EMA 计算稳定），仅还原原始数据缺失的 NaN
+            orig_nan = torch.isnan(pct_chg_t) | torch.isnan(close_raw)
+            _nan = torch.full_like(adj_close, float('nan'))
+            self.raw_data_cache["close"] = torch.where(orig_nan, _nan, adj_close)
+            self.raw_data_cache["open"]  = torch.where(orig_nan, _nan, adj_open)
+            self.raw_data_cache["high"]  = torch.where(orig_nan, _nan, adj_high)
+            self.raw_data_cache["low"]   = torch.where(orig_nan, _nan, adj_low)
+            print("  后复权: 已用 pct_chg 构造调整价格（OHLC）")
+
         self.dates = sorted(master["trade_date"].unique())
 
         # 7. 按配置的日期范围裁剪
