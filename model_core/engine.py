@@ -132,6 +132,8 @@ class AlphaEngine:
         can_pick_op_mask = active_mask & (~must_pick_feat)
         if can_pick_op_mask.any():
             mask[can_pick_op_mask, feat_count:] = 0.0
+        # 禁止在生成过程中输出 BOS token
+        mask[:, self.model.bos_id] = float('-inf')
         return mask
 
     @staticmethod
@@ -155,7 +157,7 @@ class AlphaEngine:
         B, T = seqs.shape
         feat_count = len(self.model.features_list)
         open_slots = torch.ones(B, dtype=torch.long, device=ModelConfig.DEVICE)
-        curr_inp = torch.zeros(B, 1, dtype=torch.long, device=ModelConfig.DEVICE)
+        curr_inp = torch.full((B, 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
 
         log_probs, values, entropies = [], [], []
 
@@ -215,7 +217,7 @@ class AlphaEngine:
 
             # --- Phase 1: Rollout (no grad) ---
             with torch.no_grad():
-                inp = torch.zeros((bs, 1), dtype=torch.long, device=ModelConfig.DEVICE)
+                inp = torch.full((bs, 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
                 open_slots = torch.ones(bs, dtype=torch.long, device=ModelConfig.DEVICE)
                 tokens_list = []
                 for t in range(current_max_len):
@@ -422,7 +424,7 @@ class AlphaEngine:
 
             # Round-robin：每步只训练一个公式，避免多公式共享初始状态导致的梯度冲突
             formula = all_seeds[step % len(all_seeds)]
-            inp = torch.zeros((1, 1), dtype=torch.long, device=ModelConfig.DEVICE)
+            inp = torch.full((1, 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
             loss = 0.0
             for t, target_token in enumerate(formula):
                 logits, _, _ = self.model(inp)
@@ -444,7 +446,7 @@ class AlphaEngine:
         self.model.eval()
         with torch.no_grad():
             for formula in all_seeds:
-                inp = torch.zeros((1, 1), dtype=torch.long, device=ModelConfig.DEVICE)
+                inp = torch.full((1, 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
                 correct = 0
                 for t, target_token in enumerate(formula):
                     logits, _, _ = self.model(inp)

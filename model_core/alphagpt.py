@@ -24,7 +24,7 @@ class NewtonSchulzLowRankDecay:
         self.decay_rate = decay_rate
         self.num_iterations = num_iterations
         self.target_keywords = target_keywords or ["in_proj", "out_proj"]
-        self.params_to_decay = []
+        self.params_to_decay: list[tuple[str, nn.Parameter]] = []
         
         for name, param in named_parameters:
             if not param.requires_grad or param.ndim != 2:
@@ -73,7 +73,7 @@ class StableRankMonitor:
     def __init__(self, model, target_keywords=None):
         self.model = model
         self.target_keywords = target_keywords or ["in_proj", "out_proj"]
-        self.history = []
+        self.history: list[float] = []
     
     @torch.no_grad()
     def compute(self):
