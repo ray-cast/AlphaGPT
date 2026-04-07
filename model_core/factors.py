@@ -49,6 +49,78 @@ def _rolling_mean(x, window):
     result = torch.where(nan_mask, torch.full_like(result, float('nan')), result)
     return result
 
+def _rolling_sum(x, window):
+    """沿 dim=1 的滚动求和，前期不足窗口时用累积和。"""
+    N, T = x.shape
+    if T < window:
+        return torch.cumsum(x, dim=1)
+    pad = torch.zeros(N, window - 1, device=x.device, dtype=x.dtype)
+    x_pad = torch.cat([pad, x], dim=1)
+    cs = torch.cumsum(x_pad, dim=1)
+    # cs 长度 = T + window - 1
+    # 滚动窗口: result[t] = cs[t+window-1] - cs[t-1]，对 t>=1; t=0 时 = cs[window-1]
+    # 用 cs[:, window-1:] - cs_rolled，得到 T 个值
+    rolling = cs[:, window - 1:] - torch.cat(
+        [torch.zeros(N, 1, device=x.device, dtype=x.dtype), cs[:, :T - 1]], dim=1)
+    # 前 window-1 位用累积和
+    expanding = torch.cumsum(x[:, :window - 1], dim=1)
+    return torch.cat([expanding, rolling[:, window - 1:]], dim=1) if T > window else rolling
+
+
+def _rolling_std(x, window):
+    """沿 dim=1 的滚动标准差（cumsum 公式）。"""
+    N, T = x.shape
+    if T < window:
+        return torch.zeros_like(x)
+    x2 = x * x
+    pad = torch.zeros(N, window - 1, device=x.device, dtype=x.dtype)
+    x_pad = torch.cat([pad, x], dim=1)
+    x2_pad = torch.cat([pad, x2], dim=1)
+    cs = torch.cumsum(x_pad, dim=1)
+    cs2 = torch.cumsum(x2_pad, dim=1)
+    roll_sum = cs[:, window - 1:] - torch.cat(
+        [torch.zeros(N, 1, device=x.device, dtype=x.dtype), cs[:, :T - 1]], dim=1)
+    roll_sum2 = cs2[:, window - 1:] - torch.cat(
+        [torch.zeros(N, 1, device=x.device, dtype=x.dtype), cs2[:, :T - 1]], dim=1)
+    mean = roll_sum / window
+    var = roll_sum2 / window - mean * mean
+    std = torch.sqrt(var.clamp(min=1e-12))
+    # 前 window-1 位补零
+    return torch.cat([torch.zeros(N, window - 1, device=x.device, dtype=x.dtype), std[:, window - 1:]], dim=1)
+
+
+def _rolling_max(x, window):
+    """沿 dim=1 的滚动最大值（pad + unfold，输出长度 = T）。"""
+    N, T = x.shape
+    if T < window:
+        return x
+    pad = torch.full((N, window - 1), float('-inf'), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    windows = x_pad.unfold(1, window, 1)
+    return windows.max(dim=-1)[0]
+
+
+def _rolling_min(x, window):
+    """沿 dim=1 的滚动最小值（pad + unfold，输出长度 = T）。"""
+    N, T = x.shape
+    if T < window:
+        return x
+    pad = torch.full((N, window - 1), float('inf'), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    windows = x_pad.unfold(1, window, 1)
+    return windows.min(dim=-1)[0]
+
+
+def _ema(x, span):
+    """指数移动平均。alpha = 2 / (span + 1)，逐时间步递推。"""
+    alpha = 2.0 / (span + 1)
+    result = torch.zeros_like(x)
+    result[:, 0] = x[:, 0]
+    for t in range(1, x.shape[1]):
+        result[:, t] = alpha * x[:, t] + (1.0 - alpha) * result[:, t - 1]
+    return result
+
+
 class Indicators:
     @staticmethod
     def liquidity_health(liquidity, fdv):
@@ -178,17 +250,81 @@ class Indicators:
         eps_ttm = close / (pe_ttm + 1e-9)
         return eps_ttm * roe * 100.0
 
+    @staticmethod
+    def atr(high, low, close, window=14):
+        """平均真实波幅（ATR），使用 EMA 平滑。"""
+        prev_close = torch.roll(close, 1, dims=1)
+        prev_close[:, 0] = close[:, 0]
+        tr = torch.max(high - low, torch.max(
+            (high - prev_close).abs(), (low - prev_close).abs()))
+        return _ema(tr, window)
+
+    @staticmethod
+    def mfi(high, low, close, volume, window=14):
+        """资金流量指标（成交量加权 RSI）。"""
+        tp = (high + low + close) / 3.0
+        raw_mf = tp * volume
+        prev_tp = torch.roll(tp, 1, dims=1)
+        prev_tp[:, 0] = tp[:, 0]
+        pos_mf = torch.where(tp > prev_tp, raw_mf, torch.zeros_like(raw_mf))
+        neg_mf = torch.where(tp < prev_tp, raw_mf, torch.zeros_like(raw_mf))
+        pos_sum = _rolling_sum(pos_mf, window)
+        neg_sum = _rolling_sum(neg_mf, window)
+        return 100.0 - 100.0 / (1.0 + pos_sum / (neg_sum + 1e-9))
+
+    @staticmethod
+    def macd(close, fast=12, slow=26):
+        """MACD 线（快 EMA - 慢 EMA）。"""
+        return _ema(close, fast) - _ema(close, slow)
+
+    @staticmethod
+    def bb_width(close, window=20):
+        """布林带宽度 = 4 × std / MA，归一化波动率。"""
+        ma = _rolling_mean(close, window)
+        std = _rolling_std(close, window)
+        return 4.0 * std / (ma + 1e-9)
+
+    @staticmethod
+    def willr(high, low, close, window=14):
+        """威廉 %R：超买超卖指标，范围 [-100, 0]。"""
+        hh = _rolling_max(high, window)
+        ll = _rolling_min(low, window)
+        return -(hh - close) / (hh - ll + 1e-9) * 100.0
+
+    @staticmethod
+    def obv(close, volume):
+        """能量潮指标（累积成交量方向）。"""
+        direction = torch.sign(close - torch.roll(close, 1, dims=1))
+        direction[:, 0] = 0.0
+        return torch.cumsum(direction * volume, dim=1)
+
+    @staticmethod
+    def cmo(close, window=14):
+        """钱德动量振荡器：去均值版 RSI，更灵敏。"""
+        delta = close - torch.roll(close, 1, dims=1)
+        delta[:, 0] = 0.0
+        up = torch.where(delta > 0, delta, torch.zeros_like(delta))
+        down = torch.where(delta < 0, -delta, torch.zeros_like(delta))
+        up_sum = _rolling_sum(up, window)
+        down_sum = _rolling_sum(down, window)
+        return 100.0 * (up_sum - down_sum) / (up_sum + down_sum + 1e-9)
+
 class FeatureEngineer:
-    INPUT_DIM = 13
+    FEATURES = [
+        'RET', 'RET5', 'VOL_CHG', 'AMT_RATIO', 'TURN', 'PRESSURE', 'DEV',
+        'RSI', 'TREND', 'HL_RANGE', 'CLOSE_POS', 'P_VALUE', 'VOL_CLUSTER',
+        'ATR14', 'MFI14', 'MACD', 'BB_WIDTH', 'WILLR', 'OBV', 'CMO14',
+    ]
+    INPUT_DIM = len(FEATURES)
 
     @staticmethod
     def compute_features(raw_dict):
         """
-        从原始 OHLCV 数据计算 13 维因子。
+        从原始 OHLCV 数据计算 20 维因子。
 
         输入 raw_dict 键: open, high, low, close, vol, amount, turnover_rate
           各自形状 [num_stocks, T]
-        输出: [num_stocks, 13, T]
+        输出: [num_stocks, 20, T]
         """
         c = raw_dict["close"]
         o = raw_dict["open"]
@@ -198,59 +334,51 @@ class FeatureEngineer:
         amt = raw_dict["amount"]
         turn = raw_dict["turnover_rate"]
 
-        # ---- 因子 0: 日对数收益率 ----
+        # ---- 原有 13 维因子 ----
         ret = Indicators.daily_return(c)
-
-        # ---- 因子 1: 5日累计收益率 ----
         ret5 = Indicators.cumulative_return(c, 5)
-
-        # ---- 因子 2: 成交量变化率 vs 20日均值 ----
         vol_chg = Indicators.volume_change(v, 20)
-
-        # ---- 因子 3: 成交额比 vs 20日均值 ----
         amt_ratio = Indicators.amount_ratio(amt, 20)
-
-        # ---- 因子 4: 换手率 ----
         turn_normed = robust_norm(turn)
-
-        # ---- 因子 5: 买卖压力（K线实体/振幅） ----
         pressure = Indicators.buy_sell_imbalance(c, o, h, l)
-
-        # ---- 因子 6: 偏离 20日均线 ----
         dev = Indicators.pump_deviation(c, 20)
-
-        # ---- 因子 7: 相对强弱 RSI-like ----
         rel_strength = Indicators.relative_strength(c, 14)
-
-        # ---- 因子 8: 价格 vs 60日均线（趋势） ----
         trend = Indicators.trend(c, 60)
-
-        # ---- 因子 9: 高低价振幅（HL_RANGE） ----
         hl_range = Indicators.hl_range(h, l, c)
-
-        # ---- 因子 10: 收盘在区间位置（CLOSE_POS） ----
         close_pos = Indicators.close_position(c, h, l)
-
-        # ---- 因子 11: 价值锚 P_value (EPS_TTM × ROE × 100) ----
         p_value = Indicators.p_value(c, raw_dict.get("pe_ttm"), raw_dict.get("roe"))
-
-        # ---- 因子 12: 波动率聚集（短/长期波动率比） ----
         vol_cluster = Indicators.vol_cluster(c, 5, 20)
 
+        # ---- 新增 7 维因子 ----
+        atr14 = Indicators.atr(h, l, c, 14)
+        mfi14 = Indicators.mfi(h, l, c, v, 14)
+        macd_val = Indicators.macd(c, 12, 26)
+        bb_width = Indicators.bb_width(c, 20)
+        willr_val = Indicators.willr(h, l, c, 14)
+        obv_val = Indicators.obv(c, v)
+        cmo14 = Indicators.cmo(c, 14)
+
         features = torch.stack([
-            robust_norm(ret),          # [0] RET
-            robust_norm(ret5),         # [1] RET5
-            robust_norm(vol_chg),      # [2] VOL_CHG
-            robust_norm(amt_ratio),    # [3] AMT_RATIO
-            turn_normed,               # [4] TURN
-            robust_norm(pressure),     # [5] PRESSURE
-            robust_norm(dev),          # [6] DEV
-            robust_norm(rel_strength), # [7] RSI
-            robust_norm(trend),        # [8] TREND
-            robust_norm(hl_range),     # [9] HL_RANGE
+            robust_norm(ret),          # [0]  RET
+            robust_norm(ret5),         # [1]  RET5
+            robust_norm(vol_chg),      # [2]  VOL_CHG
+            robust_norm(amt_ratio),    # [3]  AMT_RATIO
+            turn_normed,               # [4]  TURN
+            robust_norm(pressure),     # [5]  PRESSURE
+            robust_norm(dev),          # [6]  DEV
+            robust_norm(rel_strength), # [7]  RSI
+            robust_norm(trend),        # [8]  TREND
+            robust_norm(hl_range),     # [9]  HL_RANGE
             robust_norm(close_pos),    # [10] CLOSE_POS
             robust_norm(p_value),      # [11] P_VALUE
             robust_norm(vol_cluster),  # [12] VOL_CLUSTER
+            robust_norm(atr14),        # [13] ATR14
+            robust_norm(mfi14),        # [14] MFI14
+            robust_norm(macd_val),     # [15] MACD
+            robust_norm(bb_width),     # [16] BB_WIDTH
+            robust_norm(willr_val),    # [17] WILLR
+            robust_norm(obv_val),      # [18] OBV
+            robust_norm(cmo14),        # [19] CMO14
         ], dim=1)
 
         # 清理 Inf（但保留 NaN 标记停牌日）
