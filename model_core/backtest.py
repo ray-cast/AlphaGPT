@@ -77,35 +77,55 @@ class AshareBacktest:
         position = self._build_position(scores, valid_mask, self.top_n, rank_gap, self.rebalance_freq,
                                         limit_down=limit_down)
 
-        # 熊市缩仓：MA20<0 时统一缩减到 75%
-        bear_mask = market_ma20 < 0
-        stock_scale = torch.ones_like(position)
-        if bear_mask.any():
-            stock_scale[:, bear_mask] = 0.75
+        # 熊市缩仓
+        stock_scale = self._apply_execution_constraints(position, market_ma20)
 
         # 换手
+        turnover = self._compute_turnover(position)
+
+        # PnL
+        daily_pnl = self._compute_pnl(position, target_ret, turnover, stock_scale)
+
+        # 评分
+        fitness, cum_ret = self._compute_score(
+            daily_pnl, factors, target_ret, valid_mask, position, N_stocks, T_len,
+        )
+        return fitness, cum_ret, daily_pnl, turnover
+
+    def _apply_execution_constraints(self, position, market_ma20):
+        """熊市缩仓：MA20<0 时统一缩减到 75%。"""
+        stock_scale = torch.ones_like(position)
+        bear_mask = market_ma20 < 0
+        if bear_mask.any():
+            stock_scale[:, bear_mask] = 0.75
+        return stock_scale
+
+    def _compute_turnover(self, position):
+        """计算换手率矩阵。"""
         prev_pos = torch.roll(position, 1, dims=1)
         prev_pos[:, 0] = 0.0
-        turnover = torch.abs(position - prev_pos)
+        return torch.abs(position - prev_pos)
 
-        # 交易成本
+    def _compute_pnl(self, position, target_ret, turnover, stock_scale):
+        """计算每日组合收益（含交易成本和缩仓系数）。"""
         tx_cost = turnover * self.avg_cost
-
-        # PnL：应用估值感知的缩减系数（不产生虚假换手成本）
         gross_pnl = position * target_ret * stock_scale
         net_pnl = gross_pnl - tx_cost
+        return net_pnl.sum(dim=0) / (position.sum(dim=0).clamp(min=1))
 
-        # 每天 portfolio 收益（按实际持仓权重归一化，熊市减仓时分母会相应减小）
-        daily_pnl = net_pnl.sum(dim=0) / (position.sum(dim=0).clamp(min=1))
+    def _compute_score(self, daily_pnl, factors, target_ret, valid_mask, position, N_stocks, T_len):
+        """计算综合适应度：Sortino + IC - 回撤惩罚。
 
-        # ---- Fitness 计算：Sharpe + IC - 回撤惩罚 ----
+        Returns:
+            (fitness: tensor, cum_ret: float)
+        """
         cum_ret = daily_pnl.sum()
         mean_ret = daily_pnl.mean()
 
-        # 活跃度不足惩罚（硬性门槛，提前返回）
+        # 活跃度不足惩罚（硬性门槛）
         active_days = (position.sum(dim=0) > 0).float().sum()
         if active_days < 10:
-            return torch.tensor(-1.0, device=factors.device), 0.0, daily_pnl, turnover
+            return torch.tensor(-1.0, device=daily_pnl.device), 0.0
 
         # Sortino（只惩罚下行风险，不惩罚上行波动）
         downside = daily_pnl[daily_pnl < 0]
@@ -113,7 +133,7 @@ class AshareBacktest:
             down_std = downside.std() + 1e-6
         else:
             down_std = daily_pnl.std() + 1e-6
-        sortino = mean_ret / down_std * (252 ** 0.5)  # 年化 Sortino
+        sortino = mean_ret / down_std * (252 ** 0.5)
         sortino_score = torch.clamp(sortino, -3.0, 5.0)
 
         # 回撤惩罚（连续化，梯度友好）
@@ -121,17 +141,15 @@ class AshareBacktest:
         running_max = torch.cummax(cum_curve, dim=0)[0]
         drawdown = cum_curve - running_max
         max_dd = drawdown.min()
-        dd_penalty = torch.min(torch.relu(-max_dd - 0.05) * 2.0, torch.tensor(2.0, device=factors.device))
+        dd_penalty = torch.min(torch.relu(-max_dd - 0.05) * 2.0, torch.tensor(2.0, device=daily_pnl.device))
 
         # IC 奖励（截面预测能力）
         ic_bonus = 0.0
         if N_stocks > 10:
             ic_bonus = self._vectorized_ic(factors, target_ret, valid_mask, T_len, N_stocks)
 
-        # 综合得分：Sortino + IC - 回撤惩罚
         fitness = sortino_score + ic_bonus - dd_penalty
-
-        return fitness, cum_ret.item(), daily_pnl, turnover
+        return fitness, cum_ret.item()
 
     @staticmethod
     def _build_position(scores, valid_mask, top_n, rank_gap, rebalance_freq=20, limit_down=None):
