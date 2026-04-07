@@ -224,7 +224,7 @@ class LoopedTransformer(nn.Module):
         return x
 
 
-class AlphaGPT(nn.Module):
+class NeuralSymbolicAlphaGenerator(nn.Module):
     def __init__(self):
         super().__init__()
         self.d_model = 64

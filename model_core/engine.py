@@ -9,7 +9,7 @@ from tqdm import tqdm
 
 from .config import ModelConfig
 from .data_loader import AshareDataLoader
-from .alphagpt import AlphaGPT, NewtonSchulzLowRankDecay, StableRankMonitor
+from .model import NeuralSymbolicAlphaGenerator, NewtonSchulzLowRankDecay, StableRankMonitor
 from .vm import PrefixVM
 from .backtest import AshareBacktest
 from .ops import OPS_CONFIG
@@ -22,7 +22,7 @@ class AlphaEngine:
         self.loader = AshareDataLoader()
         self.loader.load_data()
 
-        self.model = AlphaGPT().to(ModelConfig.DEVICE)
+        self.model = NeuralSymbolicAlphaGenerator().to(ModelConfig.DEVICE)
 
         # 动态构建种子公式 token IDs
         self.seed_formulas = self._build_seed_formulas(seed_formulas)
