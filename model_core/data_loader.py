@@ -366,7 +366,7 @@ class AshareDataLoader:
         self.dates = sorted(master["trade_date"].unique())
 
         # 7. 按配置的日期范围裁剪
-        start_dt = ModelConfig.DATA_START_DATE
+        start_dt = ModelConfig.VALID_START_DATE
         if start_dt:
             keep_indices = [i for i, d in enumerate(self.dates) if int(d) >= int(start_dt)]
             if keep_indices:
@@ -419,29 +419,37 @@ class AshareDataLoader:
         #    每个区间为半开区间 [start, end)
         self.valid_start = 0
         self.valid_end = 0
+        self.train_start = 0
         self.train_end = 0
+        self.test_start = 0
         self.test_end = 0
+        _valid_start = int(ModelConfig.VALID_START_DATE)
         _valid_end = int(ModelConfig.VALID_END_DATE)
+        _train_start = int(ModelConfig.TRAIN_START_DATE)
         _train_end = int(ModelConfig.TRAIN_END_DATE)
+        _test_start = int(ModelConfig.TEST_START_DATE)
         _test_end = int(ModelConfig.TEST_END_DATE)
         for i, d in enumerate(self.dates):
             d_int = int(d)
+            if d_int < _valid_start:
+                self.valid_start = i + 1
             if d_int <= _valid_end:
                 self.valid_end = i + 1
+            if d_int < _train_start:
+                self.train_start = i + 1
             if d_int <= _train_end:
                 self.train_end = i + 1
+            if d_int < _test_start:
+                self.test_start = i + 1
             if d_int <= _test_end:
                 self.test_end = i + 1
-
-        self.train_start = self.valid_end
-        self.test_start = self.train_end
 
         # 边界校验
         T = len(self.dates)
         if self.valid_end < 20:
             raise ValueError(
                 f"验证集不足 20 个交易日（仅 {self.valid_end} 天），"
-                f"请检查 DATA_START_DATE / VALID_END_DATE 配置或数据完整性"
+                f"请检查 VALID_START_DATE / VALID_END_DATE 配置或数据完整性"
             )
         if self.train_end <= self.valid_end:
             raise ValueError(

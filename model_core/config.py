@@ -12,10 +12,12 @@ class ModelConfig:
     DATA_DIR = os.path.join(_PROJECT_ROOT, "data")
     BENCHMARK_INDEX = "000985.SH"   # 中证全指（回测基准）
 
-    # ---------- 数据集日期划分 ----------
-    DATA_START_DATE = "20170101"         # 数据起始日期
-    VALID_END_DATE = "20181231"          # 验证集截止（含）— 熊市压力测试
+    # ---------- 数据集日期划分（半开区间 [start, end)） ----------
+    VALID_START_DATE = "20170101"        # 验证集起始
+    VALID_END_DATE = "20181231"          # 验证集截止（含）
+    TRAIN_START_DATE = "20190101"        # 训练集起始
     TRAIN_END_DATE = "20231231"          # 训练集截止（含）
+    TEST_START_DATE = "20240101"         # 测试集起始
     TEST_END_DATE = "20261231"           # 测试集截止（含）
     # 验证集：2017-2018（熊市） | 训练集：2019-2023 | 测试集：2024-2026
 
