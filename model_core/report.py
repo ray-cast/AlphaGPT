@@ -55,7 +55,7 @@ class StrategyReport:
                 "suspended", torch.zeros_like(target_oos, dtype=torch.bool)
             )
             constituent_oos = loader.raw_data_cache.get(
-                "constituent", torch.ones_like(target_oos, dtype=torch.bool)
+                "ipo_ok", torch.ones_like(target_oos, dtype=torch.bool)
             )
             valid_mask = ~(torch.isnan(target_oos) | suspended_oos) & constituent_oos
             valid_target = torch.where(valid_mask, target_oos, 0.0)

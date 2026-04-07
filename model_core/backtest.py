@@ -1,6 +1,5 @@
 import torch
 from .config import ModelConfig
-from .filter import apply_fundamental_filter
 
 
 class AshareBacktest:
@@ -12,8 +11,9 @@ class AshareBacktest:
     """
 
     def __init__(self):
-        self.buy_cost = ModelConfig.TOTAL_BUY_COST
-        self.sell_cost = ModelConfig.TOTAL_SELL_COST
+        self.commission = 0.00025
+        self.slippage = 0.001
+        self.buy_cost = self.commission + self.slippage   # 买入：佣金 + 滑点
         self.min_turnover = ModelConfig.MIN_TURNOVER_RATE
         self.top_n = ModelConfig.TOP_N_STOCKS
         self.rebalance_freq = ModelConfig.REBALANCE_FREQ
@@ -33,10 +33,8 @@ class AshareBacktest:
                             torch.zeros_like(factors))
         suspended = raw_data.get("suspended",
                             torch.zeros_like(factors, dtype=torch.bool))
-        constituent = raw_data.get("constituent",
+        constituent = raw_data.get("ipo_ok",
                             torch.ones_like(factors, dtype=torch.bool))
-        pe_ttm_full = raw_data.get("pe_ttm")
-        roe_full = raw_data.get("roe")
         limit_up_full = raw_data.get("limit_up")
         limit_down_full = raw_data.get("limit_down")
 
@@ -46,20 +44,22 @@ class AshareBacktest:
         turnover_rate = turnover_rate[:, start_idx:end_idx]
         suspended = suspended[:, start_idx:end_idx]
         constituent = constituent[:, start_idx:end_idx]
-        pe_ttm = pe_ttm_full[:, start_idx:end_idx] if pe_ttm_full is not None else None
-        roe = roe_full[:, start_idx:end_idx] if roe_full is not None else None
         limit_up = limit_up_full[:, start_idx:end_idx] if limit_up_full is not None else None
         limit_down = limit_down_full[:, start_idx:end_idx] if limit_down_full is not None else None
 
         N_stocks, T_len = factors.shape
 
+        # 印花税按日期分段（2023-08-28 前千1，之后千0.5）
+        stamp_tax_rate_full = raw_data.get("stamp_tax_rate")
+        if stamp_tax_rate_full is not None:
+            stamp_tax_rate = stamp_tax_rate_full[start_idx:end_idx]
+        else:
+            stamp_tax_rate = torch.full((T_len,), 0.0005, device=factors.device)
+
         # 排除停牌/非成分股（NaN 信号、NaN target_ret、停牌、或非时点成分股）
         valid_mask = ~(torch.isnan(factors) | torch.isnan(target_ret) | suspended) & constituent
         tradeable = valid_mask & (turnover_rate > self.min_turnover)
         scores = torch.where(tradeable, factors, torch.tensor(float('-inf'), device=factors.device))
-
-        # 基本面过滤（训练用 soft penalty，保留探索空间）
-        apply_fundamental_filter(scores, pe_ttm, roe, soft=True)
 
         # 涨停过滤：涨停股票无法买入，从候选池排除
         if limit_up is not None:
@@ -73,8 +73,8 @@ class AshareBacktest:
         # 换手
         turnover = self._compute_turnover(position, valid_mask)
 
-        # PnL
-        daily_pnl = self._compute_pnl(position, target_ret)
+        # PnL（印花税按日期分段）
+        daily_pnl = self._compute_pnl(position, target_ret, stamp_tax_rate)
 
         # 评分
         fitness, cum_ret = self._compute_score(
@@ -88,16 +88,21 @@ class AshareBacktest:
         prev_pos[:, 0] = 0.0
         return torch.abs(position - prev_pos) * valid_mask.float()
 
-    def _compute_pnl(self, position, target_ret):
-        """计算每日组合收益（含交易成本）。买卖费率分离，卖出含印花税。"""
+    def _compute_pnl(self, position, target_ret, stamp_tax_rate):
+        """计算每日组合收益（含交易成本）。买卖费率分离，印花税按日期分段。
+
+        Args:
+            stamp_tax_rate: [T] 每日印花税率（2023-08-28前千1，之后千0.5）
+        """
         prev_pos = torch.roll(position, 1, dims=1)
         prev_pos[:, 0] = 0.0
         buy_turnover = torch.clamp(position - prev_pos, min=0.0)
         sell_turnover = torch.clamp(prev_pos - position, min=0.0)
-        tx_cost = buy_turnover * self.buy_cost + sell_turnover * self.sell_cost
+        sell_cost_t = (self.commission + stamp_tax_rate + self.slippage).unsqueeze(0)  # [1, T]
+        tx_cost = buy_turnover * self.buy_cost + sell_turnover * sell_cost_t
         gross_pnl = position * target_ret
         net_pnl = gross_pnl - tx_cost
-        return net_pnl.sum(dim=0) / (position.sum(dim=0).clamp(min=1))
+        return net_pnl.sum(dim=0) / self.top_n
 
     def _compute_score(self, daily_pnl, factors, target_ret, valid_mask, position, N_stocks, T_len):
         """计算综合适应度：Sortino + IC - 回撤惩罚。

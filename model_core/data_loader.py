@@ -1,10 +1,76 @@
 import os
-import bisect
-import glob
+from datetime import datetime, timedelta
+
 import pandas as pd
 import torch
 from .config import ModelConfig
 from .factors import FeatureEngineer
+
+
+# ------------------------------------------------------------------
+#  股票池过滤工具
+# ------------------------------------------------------------------
+
+def is_excluded_board(code: str) -> bool:
+    """判断股票是否属于排除板块（科创板/创业板/北交所）。"""
+    c = code.split(".")[0]
+    if ModelConfig.EXCLUDE_STAR and c.startswith("688"):
+        return True
+    if ModelConfig.EXCLUDE_GEM and (c.startswith("300") or c.startswith("301")):
+        return True
+    if ModelConfig.EXCLUDE_BSE and c.startswith("8"):
+        return True
+    return False
+
+
+def is_st_stock(name: str) -> bool:
+    """判断股票是否为 ST/*ST 股票（按当前名称）。"""
+    if ModelConfig.EXCLUDE_ST:
+        return "ST" in name.upper()
+    return False
+
+
+def build_ipo_mask(
+    stock_codes: list[str],
+    list_dates: list[str],
+    trade_dates: list[str],
+    min_days: int = None,
+) -> torch.Tensor:
+    """构建次新股过滤掩码 [N, T]。
+
+    True = 已上市足够久（可交易），False = 次新股（排除）。
+    """
+    if min_days is None:
+        min_days = ModelConfig.IPO_MIN_DAYS
+
+    N = len(stock_codes)
+    T = len(trade_dates)
+
+    td_parsed = []
+    for d in trade_dates:
+        try:
+            td_parsed.append(datetime.strptime(str(d), "%Y%m%d"))
+        except ValueError:
+            td_parsed.append(None)
+
+    ipo_parsed = []
+    for d in list_dates:
+        try:
+            ipo_parsed.append(datetime.strptime(str(d), "%Y%m%d"))
+        except ValueError:
+            ipo_parsed.append(None)
+
+    mask = torch.zeros(N, T, dtype=torch.bool, device=ModelConfig.DEVICE)
+    for i in range(N):
+        if ipo_parsed[i] is None:
+            mask[i, :] = True
+            continue
+        threshold = ipo_parsed[i] + timedelta(days=min_days)
+        for t in range(T):
+            if td_parsed[t] is not None and td_parsed[t] >= threshold:
+                mask[i, t] = True
+
+    return mask
 
 
 def _limit_pct_for_code(code: str) -> float:
@@ -16,9 +82,9 @@ def _limit_pct_for_code(code: str) -> float:
 
 
 class AshareDataLoader:
-    """从 CSV 文件加载沪深300成分股日线数据，转为 PyTorch tensors。"""
+    """从 CSV 文件加载全市场A股日线数据，转为 PyTorch tensors。"""
 
-    def __init__(self, data_dir: str = None, max_stocks: int = 600):
+    def __init__(self, data_dir: str = None, max_stocks: int = 3000):
         self.data_dir = data_dir or ModelConfig.DATA_DIR
         self.max_stocks = max_stocks
         self.feat_tensor = None        # [num_stocks, N_features, T]
@@ -31,68 +97,105 @@ class AshareDataLoader:
         self.test_idx = None           # 测试集截止索引（不含）
         self.benchmark_ret = None      # [T] 基准指数日收益率
 
+    def _load_stock_basic(self) -> pd.DataFrame:
+        """加载股票基本信息（上市日期、名称），用于过滤。"""
+        path = os.path.join(self.data_dir, "constituents", "stock_basic.csv")
+        if not os.path.exists(path):
+            print("  [WARN] 未找到 stock_basic.csv，跳过 ST/次新股过滤")
+            return pd.DataFrame()
+        df = pd.read_csv(path, dtype={"list_date": str})
+        return df
+
+    def _get_eligible_codes(self, stock_basic_df: pd.DataFrame) -> tuple[list[str], list[str]]:
+        """根据配置过滤股票代码，返回 (codes, list_dates)。"""
+        daily_dir = os.path.join(self.data_dir, "daily")
+
+        # 获取所有已有 CSV 的股票代码
+        csv_files = [f for f in os.listdir(daily_dir) if f.endswith(".csv")]
+        available_codes = sorted(f.replace(".csv", "") for f in csv_files)
+
+        if stock_basic_df.empty:
+            # 无元数据时，只做代码前缀过滤
+            codes = [c for c in available_codes if not is_excluded_board(c)]
+            return codes[: self.max_stocks], [""] * min(len(codes), self.max_stocks)
+
+        # 构建元数据索引
+        meta = {}
+        for _, row in stock_basic_df.iterrows():
+            meta[row["ts_code"]] = {
+                "name": str(row.get("name", "")),
+                "list_date": str(row.get("list_date", "")),
+            }
+
+        codes = []
+        list_dates = []
+        for code in available_codes:
+            # 板块过滤
+            if is_excluded_board(code):
+                continue
+            # ST 过滤（有元数据时）
+            if code in meta:
+                if is_st_stock(meta[code]["name"]):
+                    continue
+                list_dates.append(meta[code]["list_date"])
+            else:
+                list_dates.append("")
+            codes.append(code)
+            if len(codes) >= self.max_stocks:
+                break
+
+        return codes, list_dates
+
     def load_data(self):
-        print("从 CSV 加载A股数据...")
+        print("从 CSV 加载全市场A股数据...")
 
-        # 1. 读取成分股列表（当前 + 历史，消除幸存者偏差）
-        const_path = os.path.join(self.data_dir, "constituents", "hs300.csv")
-        if not os.path.exists(const_path):
-            raise FileNotFoundError(
-                f"未找到成分股列表 {const_path}\n"
-                "请先运行: python data_download.py --token YOUR_TOKEN"
-            )
-        const_df = pd.read_csv(const_path)
-        col = "con_code" if "con_code" in const_df.columns else "ts_code"
-        current_codes = set(const_df[col].dropna().unique().tolist())
+        # 1. 加载股票基本信息（用于过滤）
+        stock_basic_df = self._load_stock_basic()
 
-        # 读取历史成分股（全部时期并集）
-        hist_path = os.path.join(self.data_dir, "constituents", "hs300_history.csv")
-        hist_df = None
-        all_codes = list(current_codes)
-        if os.path.exists(hist_path):
-            hist_df = pd.read_csv(hist_path)
-            h_col = "con_code" if "con_code" in hist_df.columns else "ts_code"
-            hist_codes = set(hist_df[h_col].dropna().unique().tolist())
-            all_codes = sorted(current_codes | hist_codes)
-            print(f"  当前成分股 {len(current_codes)} 只 + 历史 {len(hist_codes)} 只 → 合并 {len(all_codes)} 只")
-        else:
-            print(f"  [WARN] 未找到历史成分股文件 {hist_path}，仅使用当前成分股（存在幸存者偏差）")
+        # 2. 获取过滤后的股票代码列表
+        loaded_codes, list_dates = self._get_eligible_codes(stock_basic_df)
+        if not loaded_codes:
+            raise ValueError("过滤后无可用股票，请检查数据目录和过滤配置")
+        print(f"  股票池: {len(loaded_codes)} 只（已排除创业板/科创板/北交所/ST）")
 
-        # 2. 逐个读取 CSV，合并为 master DataFrame
+        # 3. 逐个读取 CSV，合并为 master DataFrame
         daily_dir = os.path.join(self.data_dir, "daily")
         all_dfs = []
-        loaded_codes = []
-        for code in all_codes:
+        actual_codes = []
+        actual_list_dates = []
+        skipped = 0
+        for i, code in enumerate(loaded_codes):
             csv_path = os.path.join(daily_dir, f"{code}.csv")
             if not os.path.exists(csv_path):
                 continue
             df = pd.read_csv(csv_path)
             if df.empty or len(df) < 60:
+                skipped += 1
                 continue  # 数据太少无法计算因子
             df["ts_code"] = code
             all_dfs.append(df)
-            loaded_codes.append(code)
-            if len(loaded_codes) >= self.max_stocks:
-                break
+            actual_codes.append(code)
+            actual_list_dates.append(list_dates[i])
+
+        loaded_codes = actual_codes
+        list_dates = actual_list_dates
 
         if not all_dfs:
             raise ValueError("没有加载到任何股票数据")
+        if skipped:
+            print(f"  跳过 {skipped} 只数据不足的股票")
 
         master = pd.concat(all_dfs, ignore_index=True)
         master = master.sort_values(["ts_code", "trade_date"]).reset_index(drop=True)
         self.stock_codes = loaded_codes
 
-        # 3. 不筛选公共日期：每只股票保留各自完整时间序列
-        # 新股/停牌通过 NaN mask 在下游处理，截面算子仅作用于每日有数据的股票
+        # 4. 不筛选公共日期：每只股票保留各自完整时间序列
         master = master.dropna(subset=["close"])
 
-        # 4. Pivot 为 [stocks, T] 的 tensor
-        # 未上市的日期自然为 NaN，ffill 不填充无前值的 NaN（新股不影响）
-        # 停牌缺口由 ffill 用最近价格填充（合规）
+        # 5. Pivot 为 [stocks, T] 的 tensor
         close_pivot = master.pivot(index="trade_date", columns="ts_code", values="close")
         close_pivot = close_pivot.sort_index()
         close_pivot = close_pivot[[c for c in loaded_codes if c in close_pivot.columns]]
-        # 停牌日 close 为 NaN → 记录掩码
         suspended_mask = torch.tensor(
             close_pivot.isna().values.T, dtype=torch.bool, device=ModelConfig.DEVICE
         )
@@ -101,7 +204,6 @@ class AshareDataLoader:
             pivot = master.pivot(index="trade_date", columns="ts_code", values=col_name)
             pivot = pivot.sort_index()
             pivot = pivot[[c for c in loaded_codes if c in pivot.columns]]
-            # 停牌/缺失用最近一个交易日数据填充
             pivot = pivot.ffill()
             return torch.tensor(pivot.values.T, dtype=torch.float32, device=ModelConfig.DEVICE)
 
@@ -112,17 +214,16 @@ class AshareDataLoader:
             "close":  to_tensor("close"),
             "vol":    to_tensor("vol"),
             "amount": to_tensor("amount"),
-            "suspended": suspended_mask,   # [N, T] bool, True=停牌
+            "suspended": suspended_mask,
         }
 
-        # turnover_rate 可能不存在于早期数据
+        # turnover_rate
         if "turnover_rate" in master.columns:
             self.raw_data_cache["turnover_rate"] = to_tensor("turnover_rate")
         else:
             print("[WARN] 数据中无 turnover_rate 列，用成交量代理计算换手率")
             T = self.raw_data_cache["close"].shape[1]
             N = self.raw_data_cache["close"].shape[0]
-            # 用成交量 / 成交量20日均值 作为流动性代理（>1 视为有流动性）
             vol = self.raw_data_cache["vol"]
             vol_ma20 = torch.zeros_like(vol)
             if T >= 20:
@@ -132,18 +233,17 @@ class AshareDataLoader:
             vol_ratio = vol / (vol_ma20 + 1e-9)
             self.raw_data_cache["turnover_rate"] = vol_ratio
 
-        # 基本面指标：pe_ttm、pb（来自 daily_basic，旧数据可能缺失则跳过）
+        # 基本面指标
         if "pe_ttm" in master.columns:
             self.raw_data_cache["pe_ttm"] = to_tensor("pe_ttm")
         if "pb" in master.columns:
             self.raw_data_cache["pb"] = to_tensor("pb")
-        # 隐含 ROE ≈ PB / PE_TTM（无需额外下载季报数据）
         pe_ttm_t = self.raw_data_cache.get("pe_ttm")
         pb_t = self.raw_data_cache.get("pb")
         if pe_ttm_t is not None and pb_t is not None:
             self.raw_data_cache["roe"] = pb_t / pe_ttm_t
 
-        # 4.4 涨跌停掩码
+        # 6. 涨跌停掩码
         if "pre_close" in master.columns:
             pre_close_pivot = master.pivot(index="trade_date", columns="ts_code", values="pre_close")
             pre_close_pivot = pre_close_pivot.sort_index()
@@ -152,7 +252,6 @@ class AshareDataLoader:
                 pre_close_pivot.values.T, dtype=torch.float32, device=ModelConfig.DEVICE
             )
         else:
-            # 回退：pre_close ≈ close[t-1]
             close_t = self.raw_data_cache["close"]
             pre_close_t = torch.zeros_like(close_t)
             pre_close_t[:, 1:] = close_t[:, :-1]
@@ -164,6 +263,18 @@ class AshareDataLoader:
             [_limit_pct_for_code(code) for code in loaded_codes],
             dtype=torch.float32, device=ModelConfig.DEVICE,
         ).unsqueeze(1)  # [N, 1]
+
+        # ST 检测：主板股票若反复在 ±5% 附近收于极值价（最高/最低），疑似 ST
+        high_t = self.raw_data_cache["high"]
+        low_t = self.raw_data_cache["low"]
+        at_ceil_5 = (pct_change >= 0.045) & ((high_t - close_t) / (close_t + 1e-8) < 0.002)
+        at_floor_5 = (pct_change <= -0.045) & ((close_t - low_t) / (close_t + 1e-8) < 0.002)
+        st_score = (at_ceil_5 | at_floor_5).float().sum(dim=1)  # [N]
+        is_main = (thresholds.squeeze() == ModelConfig.PRICE_LIMIT_MAIN)  # [N]
+        is_st = (st_score >= 3) & is_main
+        if is_st.any():
+            thresholds[is_st] = ModelConfig.PRICE_LIMIT_ST
+
         limit_up = pct_change >= (thresholds - 0.005)
         limit_down = pct_change <= (-thresholds + 0.005)
         limit_up[:, 0] = False
@@ -175,7 +286,7 @@ class AshareDataLoader:
 
         self.dates = sorted(master["trade_date"].unique())
 
-        # 4.5 按配置的日期范围裁剪
+        # 7. 按配置的日期范围裁剪
         start_dt = ModelConfig.DATA_START_DATE
         if start_dt:
             keep_indices = [i for i, d in enumerate(self.dates) if int(d) >= int(start_dt)]
@@ -185,46 +296,46 @@ class AshareDataLoader:
                 for key in self.raw_data_cache:
                     self.raw_data_cache[key] = self.raw_data_cache[key][:, s:]
 
-        # 4.6 构建时点成分股掩码（消除幸存者偏差）
-        if hist_df is not None:
-            constituent_mask = self._build_constituent_mask(
-                hist_df, loaded_codes, self.dates
-            )
-            self.raw_data_cache["constituent"] = constituent_mask
-        else:
-            # 无历史数据时退化为全 True（与旧行为一致）
-            N, T = self.raw_data_cache["close"].shape
-            self.raw_data_cache["constituent"] = torch.ones(
-                N, T, dtype=torch.bool, device=ModelConfig.DEVICE
-            )
+        # 7.1 印花税时间分段（2023-08-28 由千1降至千0.5）
+        stamp_tax = torch.full(
+            (len(self.dates),), ModelConfig.STAMP_TAX_RATE_OLD,
+            dtype=torch.float32, device=ModelConfig.DEVICE,
+        )
+        for i, d in enumerate(self.dates):
+            if int(d) >= int(ModelConfig.STAMP_TAX_CHANGE_DATE):
+                stamp_tax[i:] = ModelConfig.STAMP_TAX_RATE_NEW
+                break
+        self.raw_data_cache["stamp_tax_rate"] = stamp_tax  # [T]
 
-        # 4.7 加载基准指数日收益率
+        # 8. 构建次新股掩码（替代原成分股掩码，消除新股影响）
+        N, T = self.raw_data_cache["close"].shape
+        ipo_mask = build_ipo_mask(loaded_codes, list_dates, self.dates)
+        self.raw_data_cache["ipo_ok"] = ipo_mask  # [N, T] True=已上市足够久
+
+        # 9. 加载基准指数日收益率
         self._load_benchmark_returns()
 
-        # 5. 计算因子
+        # 10. 计算因子
         self.feat_tensor = FeatureEngineer.compute_features(self.raw_data_cache)
 
-        # 5.1 预计算 NaN mask 和清洗版 feat（训练期间不变，避免 VM 逐次计算）
+        # 10.1 预计算 NaN mask 和清洗版 feat
         self.nan_mask = torch.isnan(self.feat_tensor).any(dim=1)   # [N, T] bool
-        self.clean_feat_tensor = self.feat_tensor.nan_to_num(nan=0.0)  # NaN→0
+        self.clean_feat_tensor = self.feat_tensor.nan_to_num(nan=0.0)
 
-        # 6. 计算 target_ret（open-to-open，T+1 合规）
+        # 11. 计算 target_ret（open-to-open，T+1 合规）
         op = self.raw_data_cache["open"]
-        suspended = self.raw_data_cache["suspended"]  # [N, T] 停牌掩码（ffill 前记录）
+        suspended = self.raw_data_cache["suspended"]
         op_next = torch.roll(op, -1, dims=1)
         op_next2 = torch.roll(op, -2, dims=1)
         self.target_ret = op_next2 / (op_next + 1e-9) - 1.0
         self.target_ret[:, -2:] = 0.0
-        # 停牌日的 target_ret 设为 0（ffill 后价格不变→收益≈0，但显式清零更安全）
         self.target_ret[suspended] = 0.0
-        # T+1 日也停牌的，open-to-open 收益无意义
         suspended_next = torch.roll(suspended, -1, dims=1)
         suspended_next[:, -1] = False
         self.target_ret[suspended_next] = 0.0
-        # 复牌跳空极端收益截断（A股涨跌停 ±10%/±20%，超过 ±25% 视为异常）
         self.target_ret = self.target_ret.clamp(-0.25, 0.25)
 
-        # 7. 验证/训练/测试三集切分
+        # 12. 验证/训练/测试三集切分
         self.valid_idx = 0
         self.train_idx = 0
         self.test_idx = 0
@@ -259,7 +370,9 @@ class AshareDataLoader:
             )
 
         N, T = self.raw_data_cache["close"].shape
+        ipo_ok_pct = ipo_mask.float().mean() * 100
         print(f"数据加载完成: {N} 只股票, {T} 个交易日, {self.feat_tensor.shape[1]} 个因子")
+        print(f"  次新股掩码: 平均 {ipo_ok_pct:.1f}% 的股票-日通过（上市≥{ModelConfig.IPO_MIN_DAYS}天）")
         print(f"  验证集: {self.dates[0]} ~ {self.dates[self.valid_idx-1]} ({self.valid_idx} 天)")
         print(f"  训练集: {self.dates[self.valid_idx]} ~ {self.dates[self.train_idx-1]} ({self.train_idx - self.valid_idx} 天)")
         print(f"  测试集: {self.dates[self.train_idx]} ~ {self.dates[self.test_idx-1]} ({self.test_idx - self.train_idx} 天)")
@@ -269,20 +382,19 @@ class AshareDataLoader:
     def _load_benchmark_returns(self):
         """加载沪深300指数日收益率，与 self.dates 对齐。"""
         index_path = os.path.join(
-            self.data_dir, "constituents", "hs300_index.csv"
+            self.data_dir, "constituents", "benchmark_index.csv"
         )
         if not os.path.exists(index_path):
-            print("  [WARN] 未找到HS300指数数据，基准将使用等权组合")
+            print("  [WARN] 未找到基准指数数据，基准将使用等权组合")
             self.benchmark_ret = None
             return
 
         idx_df = pd.read_csv(index_path)
         if idx_df.empty or "trade_date" not in idx_df.columns:
-            print("  [WARN] HS300指数数据为空，基准将使用等权组合")
+            print("  [WARN] 基准指数数据为空，基准将使用等权组合")
             self.benchmark_ret = None
             return
 
-        # 使用 pct_chg 列（日涨跌幅 %）或自行从 close 计算
         if "pct_chg" in idx_df.columns:
             idx_df["daily_ret"] = idx_df["pct_chg"].astype(float) / 100.0
         elif "close" in idx_df.columns:
@@ -290,11 +402,10 @@ class AshareDataLoader:
             idx_df["daily_ret"] = idx_df["close"].astype(float).pct_change()
             idx_df = idx_df.dropna(subset=["daily_ret"])
         else:
-            print("  [WARN] HS300指数数据无 pct_chg 或 close 列")
+            print("  [WARN] 基准指数数据无 pct_chg 或 close 列")
             self.benchmark_ret = None
             return
 
-        # 与 self.dates 对齐：构建 date → daily_ret 映射
         idx_map = dict(zip(
             idx_df["trade_date"].astype(str),
             idx_df["daily_ret"].astype(float)
@@ -309,61 +420,4 @@ class AshareDataLoader:
                 matched += 1
 
         self.benchmark_ret = bench
-        print(f"  HS300指数基准: {matched}/{T} 个交易日已匹配")
-
-    def _build_constituent_mask(self, hist_df, loaded_codes, all_dates):
-        """构建时点成分股掩码 [num_stocks, T]。
-
-        对每个交易日，找到最近一次指数调整日，标记该股票是否为成分股。
-
-        Args:
-            hist_df: 历史成分股 DataFrame（含 trade_date, con_code 列）
-            loaded_codes: 已加载的股票代码列表（与 tensor dim=0 对齐）
-            all_dates: 所有交易日列表（与 tensor dim=1 对齐）
-        Returns:
-            constituent_mask: [N, T] bool tensor，True=该股票在该日期是沪深300成分股
-        """
-        h_col = "con_code" if "con_code" in hist_df.columns else "ts_code"
-
-        # 按调整日分组：{rebalance_date: set(con_codes)}
-        rebalance_dates = sorted(str(d) for d in hist_df["trade_date"].unique())
-        rebalance_map = {}
-        for rd in rebalance_dates:
-            rebalance_map[rd] = set(
-                hist_df.loc[hist_df["trade_date"].astype(str) == rd, h_col].tolist()
-            )
-
-        N = len(loaded_codes)
-        T = len(all_dates)
-        mask = torch.zeros(N, T, dtype=torch.bool, device=ModelConfig.DEVICE)
-
-        # 向量化构建：预计算每个交易日的最近调整日索引，按调整日分组批量处理
-        code_to_idx = {code: i for i, code in enumerate(loaded_codes)}
-        from collections import defaultdict
-        rd_to_t_indices = defaultdict(list)
-        uncovered_t = []  # 没有匹配到调整日的交易日
-        for t, date in enumerate(all_dates):
-            idx = bisect.bisect_right(rebalance_dates, str(date)) - 1
-            if idx >= 0:
-                rd_to_t_indices[idx].append(t)
-            else:
-                uncovered_t.append(t)
-
-        for rd_idx, t_indices in rd_to_t_indices.items():
-            active_codes = rebalance_map[rebalance_dates[rd_idx]]
-            for code in active_codes:
-                if code in code_to_idx:
-                    i = code_to_idx[code]
-                    mask[i, t_indices] = True
-
-        # 对没有匹配到调整日的交易日（数据不足），回退为全 True
-        if uncovered_t:
-            mask[:, uncovered_t] = True
-            print(f"  [WARN] {len(uncovered_t)} 个交易日无调整日数据，回退为全部股票可用")
-
-        # 打印诊断信息
-        active_counts = mask.float().sum(dim=0)
-        print(f"  PIT成分股掩码: 平均每日 {active_counts.mean():.0f} 只成分股 "
-              f"(最少 {active_counts.min():.0f}, 最多 {active_counts.max():.0f})")
-
-        return mask
+        print(f"  基准指数: {matched}/{T} 个交易日已匹配")

@@ -1,5 +1,12 @@
 """
-沪深300成分股数据下载脚本
+全A股（主板）数据下载脚本
+
+过滤规则:
+    - 排除科创板 (688xxx)
+    - 排除创业板 (300xxx, 301xxx)
+    - 排除北交所 (8xxxxx)
+    - 排除 ST/*ST 股票
+    - 排除次新股（上市不足 250 个自然日）
 
 用法:
     python data_download.py [--start 20150101] [--end 20260404]
@@ -9,7 +16,8 @@
 数据目录结构:
     data/
       constituents/
-        hs300.csv              # 成分股列表
+        stock_basic.csv         # 全市场股票基本信息（含上市日期、名称）
+        benchmark_index.csv     # 基准指数日线（中证全指）
       daily/
         000001.SZ.csv          # 每只股票一个CSV文件
         600519.SH.csv
@@ -21,6 +29,7 @@ import sys
 import time
 import argparse
 import pandas as pd
+from datetime import datetime
 from dotenv import load_dotenv
 
 try:
@@ -30,8 +39,8 @@ except ImportError:
     sys.exit(1)
 
 # 加载 .env 文件中的环境变量
-# override=True 确保 .env 文件中的设置覆盖系统环境变量
 load_dotenv(override=True)
+
 
 class TushareDownloader:
     def __init__(self, token: str, data_dir: str = "data"):
@@ -43,159 +52,108 @@ class TushareDownloader:
         os.makedirs(self.daily_dir, exist_ok=True)
 
     # ------------------------------------------------------------------
-    #  成分股列表
+    #  全市场股票列表
     # ------------------------------------------------------------------
-    def fetch_constituents(self) -> pd.DataFrame:
-        """获取沪深300最新成分股列表，缓存到 CSV。"""
-        cache_path = os.path.join(self.const_dir, "hs300.csv")
+    def fetch_stock_basic(self) -> pd.DataFrame:
+        """获取全A股股票基本信息，缓存到 CSV。
 
-        # 尝试获取最近一期的成分股权重
-        try:
-            # 用最近日期获取成分股
-            trade_cal = self.pro.trade_cal(
-                exchange="SSE", is_open=1,
-                start_date="20250101", end_date="20260404",
-                fields="cal_date"
-            )
-            latest_date = trade_cal["cal_date"].iloc[-1]
-            df = self.pro.index_weight(
-                index_code="000300.SH",
-                start_date=latest_date,
-                fields="index_code,con_code,weight,trade_date"
-            )
-            if df.empty:
-                # 回退到更早日期
-                df = self.pro.index_weight(
-                    index_code="000300.SH",
-                    start_date="20250101",
-                    end_date="20260404",
-                    fields="index_code,con_code,weight,trade_date"
-                )
-                # 取最后一期
-                last_date = df["trade_date"].max()
-                df = df[df["trade_date"] == last_date]
-        except Exception:
-            # 兜底：用 hs300 接口
-            df = self.pro.hs300(
-                fields="ts_code,name,weight",
-                start_date="20250101",
-                end_date="20260404"
-            )
-            df = df.rename(columns={"ts_code": "con_code"})
-            df["index_code"] = "000300.SH"
+        包含字段: ts_code, name, area, industry, market, list_date
+        """
+        cache_path = os.path.join(self.const_dir, "stock_basic.csv")
+        if os.path.exists(cache_path):
+            df = pd.read_csv(cache_path, dtype={"list_date": str})
+            print(f"从缓存加载股票列表: {len(df)} 只")
+            return df
 
+        df = self.pro.stock_basic(
+            exchange="",
+            list_status="L",
+            fields="ts_code,name,area,industry,market,list_date",
+        )
+        df["list_date"] = df["list_date"].astype(str)
         df.to_csv(cache_path, index=False, encoding="utf-8-sig")
-        print(f"成分股列表已保存: {cache_path} ({len(df)} 只)")
+        print(f"股票列表已保存: {cache_path} ({len(df)} 只)")
         return df
 
-    def load_constituent_codes(self) -> list[str]:
-        """从缓存读取成分股代码列表。"""
-        cache_path = os.path.join(self.const_dir, "hs300.csv")
-        if not os.path.exists(cache_path):
-            raise FileNotFoundError(
-                f"未找到成分股缓存 {cache_path}，请先运行 fetch_constituents()"
-            )
-        df = pd.read_csv(cache_path)
-        col = "con_code" if "con_code" in df.columns else "ts_code"
-        codes = df[col].dropna().unique().tolist()
-        print(f"从缓存加载 {len(codes)} 只成分股")
-        return codes
+    def get_filtered_codes(
+        self,
+        exclude_gem: bool = True,
+        exclude_star: bool = True,
+        exclude_bse: bool = True,
+        exclude_st: bool = True,
+        ipo_min_days: int = 250,
+    ) -> list[str]:
+        """获取过滤后的股票代码列表（用于下载）。
 
-    # ------------------------------------------------------------------
-    #  历史成分股（消除幸存者偏差）
-    # ------------------------------------------------------------------
-    def fetch_constituents_history(
-        self, start_date: str = "20160101", end_date: str = None
-    ) -> pd.DataFrame:
-        """获取沪深300全部历史成分股权重，缓存到 CSV。
-
-        按年分段查询 index_weight 接口，避免 Tushare 单次 6000 行限制导致只拿到最新数据。
-        消除幸存者偏差的关键数据源。
+        过滤规则:
+            - 科创板 (688xxx)
+            - 创业板 (300xxx, 301xxx)
+            - 北交所 (8xxxxx)
+            - ST/*ST 股票（按当前名称判断）
+            - 次新股（上市不足 ipo_min_days 个自然日）
         """
-        import datetime as _dt
-        if end_date is None:
-            end_date = time.strftime("%Y%m%d")
-        cache_path = os.path.join(self.const_dir, "hs300_history.csv")
+        df = self.fetch_stock_basic()
+        before = len(df)
 
-        start_y = int(start_date[:4])
-        end_y = int(end_date[:4])
+        # 提取纯代码前缀
+        codes = df["ts_code"].str.split(".").str[0]
+        names = df["name"].fillna("").str.upper()
+        list_dates = df["list_date"].fillna("").astype(str)
 
-        # 按年分段查询（每年 ~3600 行，远低于 6000 行限制）
-        all_pages = []
-        for y in range(start_y, end_y + 1):
-            y_start = max(f"{y}0101", start_date)
-            y_end = min(f"{y}1231", end_date)
-            try:
-                df = self.pro.index_weight(
-                    index_code="000300.SH",
-                    start_date=y_start,
-                    end_date=y_end,
-                    fields="index_code,con_code,weight,trade_date",
-                )
-            except Exception as e:
-                print(f"  [WARN] 历史成分股查询失败 ({y_start}~{y_end}): {e}")
-                continue
+        # 板块过滤
+        keep = pd.Series(True, index=df.index)
+        if exclude_star:
+            keep &= ~codes.str.startswith("688")
+        if exclude_gem:
+            keep &= ~codes.str.startswith("300") & ~codes.str.startswith("301")
+        if exclude_bse:
+            keep &= ~codes.str.startswith("8")
+        # ST 过滤
+        if exclude_st:
+            keep &= ~names.str.contains("ST")
+        # 次新股过滤
+        valid_date = list_dates.str.len() == 8
+        if ipo_min_days > 0:
+            today = datetime.now()
+            ipo_dates = pd.to_datetime(list_dates.where(valid_date), format="%Y%m%d", errors="coerce")
+            days_since = (today - ipo_dates).dt.days
+            keep &= ~(valid_date & (days_since < ipo_min_days))
 
-            if df is not None and not df.empty:
-                all_pages.append(df)
-                n_dates = df["trade_date"].nunique()
-                print(f"  {y}: {len(df)} 行, {n_dates} 个调整期")
-            time.sleep(0.35)
-
-        if not all_pages:
-            print("  [WARN] 未获取到历史成分股数据，使用缓存（如有）")
-            if os.path.exists(cache_path):
-                return pd.read_csv(cache_path)
-            return pd.DataFrame()
-
-        result = pd.concat(all_pages, ignore_index=True)
-        result = result.drop_duplicates(subset=["con_code", "trade_date"], keep="last")
-
-        # 与已有缓存合并
-        if os.path.exists(cache_path):
-            existing = pd.read_csv(cache_path)
-            result = pd.concat([existing, result], ignore_index=True)
-            result = result.drop_duplicates(subset=["con_code", "trade_date"], keep="last")
-
-        result = result.sort_values(["trade_date", "con_code"]).reset_index(drop=True)
-        result.to_csv(cache_path, index=False, encoding="utf-8-sig")
-
-        rebalance_dates = result["trade_date"].nunique()
-        unique_codes = result["con_code"].nunique()
-        date_range = f"{result['trade_date'].min()}~{result['trade_date'].max()}"
-        print(f"历史成分股已保存: {cache_path} "
-              f"({rebalance_dates} 个调整期, {unique_codes} 只股票, {date_range})")
-        return result
+        filtered = df.loc[keep, "ts_code"].tolist()
+        n_excluded = before - len(filtered)
+        print(f"股票过滤: {before} → {len(filtered)} 只 (排除 {n_excluded} 只)")
+        return sorted(filtered)
 
     # ------------------------------------------------------------------
-    #  HS300 指数日线（正确基准）
+    #  指数日线（基准）
     # ------------------------------------------------------------------
-    def fetch_index_daily(self, start_date: str = "20160101", end_date: str = None):
-        """下载沪深300指数日线行情，作为回测基准。"""
+    def fetch_index_daily(self, start_date: str = "20160101", end_date: str = None,
+                          index_code: str = "000985.SH"):
+        """下载指数日线行情，作为回测基准。默认中证全指。"""
         if end_date is None:
             end_date = time.strftime("%Y%m%d")
-        cache_path = os.path.join(self.const_dir, "hs300_index.csv")
+        cache_path = os.path.join(self.const_dir, "benchmark_index.csv")
 
         actual_start = start_date
         append_mode = False
         if os.path.exists(cache_path):
-            existing = pd.read_csv(cache_path)
+            existing = pd.read_csv(cache_path, dtype={"trade_date": str})
             if not existing.empty:
                 last_date = str(existing["trade_date"].max())
                 actual_start = last_date
                 append_mode = True
                 if last_date >= end_date:
-                    print(f"HS300指数数据已是最新 ({last_date})")
+                    print(f"指数数据已是最新 ({last_date})")
                     return existing
 
         try:
             df = self.pro.index_daily(
-                ts_code="000300.SH",
+                ts_code=index_code,
                 start_date=actual_start,
                 end_date=end_date,
             )
         except Exception as e:
-            print(f"  [WARN] HS300指数获取失败: {e}")
+            print(f"  [WARN] 指数获取失败: {e}")
             if os.path.exists(cache_path):
                 return pd.read_csv(cache_path)
             return pd.DataFrame()
@@ -203,31 +161,21 @@ class TushareDownloader:
         if df.empty:
             return pd.read_csv(cache_path) if os.path.exists(cache_path) else df
 
+        df["trade_date"] = df["trade_date"].astype(str)
         df = df.sort_values("trade_date").reset_index(drop=True)
 
         if append_mode and os.path.exists(cache_path):
-            existing = pd.read_csv(cache_path)
+            existing = pd.read_csv(cache_path, dtype={"trade_date": str})
             combined = pd.concat([existing, df], ignore_index=True)
             combined = combined.drop_duplicates(subset=["trade_date"], keep="last")
             combined = combined.sort_values("trade_date").reset_index(drop=True)
             combined.to_csv(cache_path, index=False, encoding="utf-8-sig")
-            print(f"HS300指数已更新: {cache_path} ({len(combined)} 行)")
+            print(f"指数已更新: {cache_path} ({len(combined)} 行)")
             return combined
         else:
             df.to_csv(cache_path, index=False, encoding="utf-8-sig")
-            print(f"HS300指数已保存: {cache_path} ({len(df)} 行)")
+            print(f"指数已保存: {cache_path} ({len(df)} 行)")
             return df
-
-    def load_history_constituent_codes(self) -> list[str]:
-        """从缓存读取全部历史成分股代码（并集），用于扩展下载范围。"""
-        cache_path = os.path.join(self.const_dir, "hs300_history.csv")
-        if not os.path.exists(cache_path):
-            return []
-        df = pd.read_csv(cache_path)
-        col = "con_code" if "con_code" in df.columns else "ts_code"
-        codes = df[col].dropna().unique().tolist()
-        print(f"从历史缓存加载 {len(codes)} 只成分股（全部时期并集）")
-        return codes
 
     # ------------------------------------------------------------------
     #  单只股票日线数据
@@ -240,7 +188,7 @@ class TushareDownloader:
         actual_start = start_date
         append_mode = False
         if os.path.exists(csv_path):
-            existing = pd.read_csv(csv_path)
+            existing = pd.read_csv(csv_path, dtype={"trade_date": str})
             if not existing.empty:
                 last_date = str(existing["trade_date"].max())
                 # 从下一个交易日开始
@@ -265,6 +213,9 @@ class TushareDownloader:
         if daily.empty:
             return pd.read_csv(csv_path) if os.path.exists(csv_path) else daily
 
+        # 统一 trade_date 为字符串，避免 merge 时 str/int 类型冲突
+        daily["trade_date"] = daily["trade_date"].astype(str)
+
         # 获取换手率 + 基本面指标（需要 daily_basic 接口）
         try:
             basic = self.pro.daily_basic(
@@ -274,6 +225,7 @@ class TushareDownloader:
                 fields="ts_code,trade_date,turnover_rate,pe_ttm,pb"
             )
             if not basic.empty:
+                basic["trade_date"] = basic["trade_date"].astype(str)
                 daily = daily.merge(basic, on=["ts_code", "trade_date"], how="left")
         except Exception:
             daily["turnover_rate"] = 0.0
@@ -286,7 +238,7 @@ class TushareDownloader:
 
         # 写文件
         if append_mode and os.path.exists(csv_path):
-            existing = pd.read_csv(csv_path)
+            existing = pd.read_csv(csv_path, dtype={"trade_date": str})
             combined = pd.concat([existing, daily], ignore_index=True)
             combined = combined.drop_duplicates(
                 subset=["ts_code", "trade_date"], keep="last"
@@ -302,31 +254,33 @@ class TushareDownloader:
     #  批量下载
     # ------------------------------------------------------------------
     def fetch_all(self, start_date: str = "20150101", end_date: str = None):
-        """批量下载所有沪深300成分股日线数据。"""
+        """批量下载全市场（已过滤）股票日线数据。"""
         if end_date is None:
             end_date = time.strftime("%Y%m%d")
 
-        # 确保有成分股列表（当前 + 历史，消除幸存者偏差）
-        try:
-            codes_current = self.load_constituent_codes()
-        except FileNotFoundError:
-            print("成分股缓存不存在，正在获取...")
-            self.fetch_constituents()
-            codes_current = self.load_constituent_codes()
-        codes_history = self.load_history_constituent_codes()
-        codes = sorted(set(codes_current) | set(codes_history))
+        codes = self.get_filtered_codes()
 
         total = len(codes)
         print(f"开始下载 {total} 只股票日线数据 ({start_date} ~ {end_date})")
 
-        success, fail = 0, 0
+        success, fail, skip = 0, 0, 0
         for i, code in enumerate(codes, 1):
+            csv_path = os.path.join(self.daily_dir, f"{code}.csv")
+            # 增量：已存在且最新的跳过
+            if os.path.exists(csv_path):
+                try:
+                    existing = pd.read_csv(csv_path, dtype={"trade_date": str})
+                    if not existing.empty and str(existing["trade_date"].max()) >= end_date:
+                        skip += 1
+                        continue
+                except Exception:
+                    pass
+
             try:
                 df = self.fetch_daily(code, start_date, end_date)
                 rows = len(df) if not df.empty else 0
                 success += 1
-                if i % 20 == 0 or i == total:
-                    print(f"  [{i}/{total}] {code}: {rows} 行")
+                print(f"  [{i}/{total}] {code}: {rows} 行")
             except Exception as e:
                 fail += 1
                 print(f"  [{i}/{total}] {code}: 失败 - {e}")
@@ -334,18 +288,16 @@ class TushareDownloader:
             # Tushare 限频控制
             time.sleep(0.35)
 
-        print(f"\n下载完成: 成功 {success}, 失败 {fail}")
+        print(f"\n下载完成: 成功 {success}, 失败 {fail}, 跳过 {skip}")
         print(f"数据目录: {self.daily_dir}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="沪深300成分股数据下载")
+    parser = argparse.ArgumentParser(description="全A股（主板）数据下载")
     parser.add_argument("--token", default=None, help="Tushare Pro API Token（默认从 .env 读取）")
     parser.add_argument("--start", default="20150101", help="起始日期 (默认 20150101)")
     parser.add_argument("--end", default=None, help="结束日期 (默认今天)")
     parser.add_argument("--data-dir", default="data", help="数据存储目录 (默认 data)")
-    parser.add_argument("--history-only", action="store_true",
-                        help="仅下载历史成分股（不更新日线等数据）")
     args = parser.parse_args()
 
     token = args.token or os.getenv("TUSHARE_TOKEN", "")
@@ -354,14 +306,9 @@ def main():
         sys.exit(1)
 
     dl = TushareDownloader(token=token, data_dir=args.data_dir)
-
-    if args.history_only:
-        dl.fetch_constituents_history(start_date=args.start, end_date=args.end)
-    else:
-        dl.fetch_constituents()
-        dl.fetch_constituents_history(start_date=args.start, end_date=args.end)
-        dl.fetch_index_daily(start_date=args.start, end_date=args.end)
-        dl.fetch_all(start_date=args.start, end_date=args.end)
+    dl.fetch_stock_basic()
+    dl.fetch_index_daily(start_date=args.start, end_date=args.end)
+    dl.fetch_all(start_date=args.start, end_date=args.end)
 
 
 if __name__ == "__main__":

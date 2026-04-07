@@ -10,7 +10,7 @@ class ModelConfig:
 
     # ---------- 数据路径 ----------
     DATA_DIR = os.path.join(_PROJECT_ROOT, "data")
-    BENCHMARK_INDEX = "000300.SH"   # 沪深300指数代码（回测基准）
+    BENCHMARK_INDEX = "000985.SH"   # 中证全指（回测基准）
 
     # ---------- 数据集日期划分 ----------
     DATA_START_DATE = "20170101"         # 数据起始日期
@@ -26,11 +26,15 @@ class ModelConfig:
 
     # ---------- A股交易成本 ----------
     TOTAL_BUY_COST = 0.00025 + 0.001     # 买入成本（佣金万2.5 + 滑点千1）
-    TOTAL_SELL_COST = 0.00025 + 0.0005 + 0.001  # 卖出成本（佣金+印花税千1+滑点千1）
+    TOTAL_SELL_COST = 0.00025 + 0.0005 + 0.001  # 卖出成本（佣金+印花税千0.5+滑点千1）
+    STAMP_TAX_RATE_OLD = 0.001           # 印花税率（2023-08-28 前，卖出单边千1）
+    STAMP_TAX_RATE_NEW = 0.0005          # 印花税率（2023-08-28 起，卖出单边千0.5）
+    STAMP_TAX_CHANGE_DATE = "20230828"   # 印花税减半生效日
 
     # ---------- A股交易规则 ----------
     PRICE_LIMIT_MAIN = 0.10        # 主板涨跌停 ±10%
     PRICE_LIMIT_GEM = 0.20         # 创业板/科创板 ±20%
+    PRICE_LIMIT_ST = 0.05          # ST 股涨跌停 ±5%
     MIN_LOT_SIZE = 100             # 最小交易单位（股）
     MIN_TURNOVER_RATE = 0.005      # 最低换手率（过滤停牌/流动性不足）
 
@@ -57,9 +61,13 @@ class ModelConfig:
     REBALANCE_FREQ = 10            # 再平衡周期（交易日）：每 N 天执行一次截面选股，非再平衡日沿用上一日持仓
     REBALANCE_RANK_GAP = 5         # 换仓排名阈值：新候选领先最弱持仓至少N名才调仓（0=关闭）
 
-    # ---------- 基本面过滤 ----------
-    MAX_PE_TTM = 25                # 最高市盈率TTM（排除高估值；PE<=0 隐含排除亏损股即 EPS<=0）
-    MIN_ROE = 0                    # 最低ROE（通过 PB/PE_TTM 近似；排除低效公司）
+    # ---------- 全市场股票池 ----------
+    UNIVERSE = "all"                # "hs300" 仅沪深300 | "all" 全A股主板
+    EXCLUDE_GEM = True              # 排除创业板 (300xxx, 301xxx)
+    EXCLUDE_STAR = True             # 排除科创板 (688xxx)
+    EXCLUDE_BSE = True              # 排除北交所 (8xxxxx)
+    EXCLUDE_ST = True               # 排除 ST/*ST 股票
+    IPO_MIN_DAYS = 250              # 上市最少N个自然日（过滤次新股，≈1年）
 
     # ---------- SFT 热启动 ----------
     SEED_FORMULA_NAMES = [         # 种子公式（名称格式，token ID 动态计算）

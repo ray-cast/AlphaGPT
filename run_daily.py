@@ -33,15 +33,15 @@ def update_data(token: str, data_dir: str):
 
     dl = TushareDownloader(token=token, data_dir=data_dir)
 
-    print("[1/3] 更新沪深300成分股列表...")
-    dl.fetch_constituents()
     today = datetime.now().strftime("%Y%m%d")
-    dl.fetch_constituents_history(start_date="20160101", end_date=today)
 
-    print("[2/3] 下载HS300指数基准数据...")
+    print("[1/3] 获取全市场股票列表...")
+    dl.fetch_stock_basic()
+
+    print("[2/3] 下载中证全指基准数据...")
     dl.fetch_index_daily(start_date="20150101", end_date=today)
 
-    print("[3/3] 增量更新日线数据...")
+    print("[3/3] 增量更新全市场日线数据...")
     dl.fetch_all(start_date="20150101", end_date=today)
 
     print("数据更新完成。")

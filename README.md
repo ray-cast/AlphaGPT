@@ -1,11 +1,11 @@
 # AlphaGPT
 ## 项目简介
 
-AlphaGPT 是一套 **AI 驱动的量化选股系统**，核心思路是用 Transformer 模型自动生成可解释的 Alpha 因子公式，通过截面回测打分筛选，输出每日沪深300成分股 Top N 选股信号。
+AlphaGPT 是一套 **AI 驱动的量化选股系统**，核心思路是用 Transformer 模型自动生成可解释的 Alpha 因子公式，通过截面回测打分筛选，输出全市场主板 Top N 选股信号。
 
 ## 主流程（从数据到信号）
 
-1. **数据采集** — `data_download.py` 通过 Tushare Pro 拉取沪深300成分股及日线行情，存为 CSV
+1. **数据采集** — `data_download.py` 通过 Tushare Pro 拉取全市场主板股票日线行情，自动过滤次新股/科创板/创业板/ST股
 2. **模型训练** — `model_core` 用 REINFORCE 策略梯度训练 Transformer 生成最优因子公式
 3. **信号输出** — 对最新交易日截面打分，输出 Top 30 选股信号至 `signals/` 目录
 
@@ -82,7 +82,7 @@ python run_daily.py
 
 - **不是直接预测价格**，而是"生成公式 → 解释执行 → 回测评分 → 优化生成器"
 - 公式 = token 序列，token 由"特征 + 算子"组成，StackVM 执行成因子信号
-- 截面选股：每日对沪深300成分股打分排序，做多 Top N
+- 截面选股：每日对全市场主板股票打分排序，做多 Top N
 
 ## 因子与算子
 
@@ -94,38 +94,41 @@ python run_daily.py
 
 | 参数 | 值 | 说明 |
 |------|----|------|
-| 标的池 | 沪深300 成分股 | 自动获取最新名单 |
+| 标的池 | 全市场主板（~3000只） | 自动过滤次新股/科创板/创业板/北交所/ST |
+| 基准指数 | 中证全指 (000985.SH) | 回测对比基准 |
 | 回测指标 | Sortino Ratio | 含回撤惩罚 + 换手惩罚 |
 | 佣金 | 万 2.5 | 双边 |
-| 印花税 | 千 1 | 卖出 |
-| 涨跌停 | 主板 10% / 创业板科创板 20% | 回测中限制 |
+| 印花税 | 千 0.5（2023-08-28后） | 卖出单边，此前千 1 |
+| 涨跌停 | 主板 10% / ST 5% | 回测中限制 |
 | 交易制度 | T+1 | 开盘价对开盘价收益 |
-| 选股数量 | Top 30 | 截面排名前 30 |
+| 选股数量 | Top 20 | 截面排名前 20 |
+| 再平衡 | 每 10 个交易日 | 非再平衡日沿用持仓 |
+| 次新股过滤 | 上市 ≥ 250 个自然日 | 动态点对点过滤 |
 | 训练步数 | 500 步 | REINFORCE 策略梯度 |
-| 公式最大长度 | 12 tokens | |
+| 公式最大长度 | 8 tokens | |
 
 ## 代码组织
 
 ```
 AlphaGPT/
 ├── run_daily.py           # 每日策略入口（数据更新 → 训练 → 信号输出）
-├── data_download.py       # Tushare 数据下载器（沪深300成分股 + 日线行情）
-├── report.py              # 快捷训练+信号生成
-├── times.py               # 独立实验：单 ETF Alpha 挖矿（研究用）
+├── data_download.py       # Tushare 数据下载器（全市场主板 + 基准指数）
 ├── model_core/            # 核心模块
-│   ├── config.py          # A股参数配置（佣金、印花税、涨跌停、T+1 等）
-│   ├── data_loader.py     # AshareDataLoader：从 CSV 构建特征张量
-│   ├── factors.py         # 特征工程（9 维因子）
-│   ├── ops.py             # 12 个数学算子（ADD, SUB, GATE, DECAY 等）
+│   ├── config.py          # A股参数配置（佣金、印花税、涨跌停、T+1、股票池过滤等）
+│   ├── data_loader.py     # AshareDataLoader：从 CSV 构建特征张量 + 股票池过滤（板块/ST/次新股）
+│   ├── factors.py         # 特征工程
+│   ├── ops.py             # 数学算子（ADD, SUB, GATE, DECAY 等）
 │   ├── vm.py              # 栈式虚拟机，执行公式 token 序列
-│   ├── alphagpt.py        # 核心 Transformer 模型 + LoRD 正则化 + MTP Head
+│   ├── model.py           # 核心 Transformer 模型 + LoRD 正则化 + MTP Head
 │   ├── backtest.py        # AshareBacktest：截面回测引擎（Sortino 评分）
 │   ├── engine.py          # AlphaEngine：RL 训练循环
+│   ├── report.py          # StrategyReport：OOS 业绩评估 + 可视化
 │   └── signal_writer.py   # 信号输出（CSV 格式）
 ├── data/                  # 本地数据存储
-│   ├── constituents/      # 沪深300成分股列表 (hs300.csv)
+│   ├── constituents/      # stock_basic.csv（全市场元数据）+ benchmark_index.csv
 │   └── daily/             # 个股日线数据 ({code}.csv)
 ├── signals/               # 输出信号目录
+├── ashare/                # 分钟频回测（独立流水线）
 ├── lord/                  # 研究：LoRD 正则化实验
 ├── paper/                 # 学术论文
 └── assets/                # README 图片资源
