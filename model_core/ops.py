@@ -2,156 +2,7 @@ import torch
 import torch.jit
 
 
-def _ts_delta(x: torch.Tensor, d: int) -> torch.Tensor:
-    """时序变化量：x(t) - x(t-d)。"""
-    return x - _ts_delay(x, d)
-
-
-def _ts_decay_linear(x: torch.Tensor, d: int) -> torch.Tensor:
-    """线性衰减均线：近期权重更大。"""
-    if d <= 1: return x
-    B, T = x.shape
-    pad = torch.zeros((B, d - 1), device=x.device)
-    x_pad = torch.cat([pad, x], dim=1)
-    windows = x_pad.unfold(1, d, 1)
-    w = torch.arange(1, d + 1, device=x.device, dtype=x.dtype)
-    w = w / w.sum()
-    return (windows * w).sum(dim=-1)
-
-
-def _ts_rank(x: torch.Tensor, d: int) -> torch.Tensor:
-    """时序排名百分位：当前值在过去 d 天中的排名归一化到 [0, 1]。"""
-    if d <= 1: return torch.zeros_like(x)
-    B, T = x.shape
-    pad = torch.zeros((B, d - 1), device=x.device)
-    x_pad = torch.cat([pad, x], dim=1)
-    windows = x_pad.unfold(1, d, 1)
-    current = x.unsqueeze(-1)
-    rank = (windows < current).sum(dim=-1).float()
-    return rank / (d - 1)
-
-
-def _ts_min(x: torch.Tensor, d: int) -> torch.Tensor:
-    """时序滚动最小值。"""
-    if d <= 1: return x
-    B, T = x.shape
-    pad = torch.full((B, d - 1), float('inf'), device=x.device)
-    x_pad = torch.cat([pad, x], dim=1)
-    windows = x_pad.unfold(1, d, 1)
-    return windows.min(dim=-1)[0]
-
-
-def _ts_max(x: torch.Tensor, d: int) -> torch.Tensor:
-    """时序滚动最大值。"""
-    if d <= 1: return x
-    B, T = x.shape
-    pad = torch.full((B, d - 1), float('-inf'), device=x.device)
-    x_pad = torch.cat([pad, x], dim=1)
-    windows = x_pad.unfold(1, d, 1)
-    return windows.max(dim=-1)[0]
-
-
-def _ts_std(x: torch.Tensor, d: int) -> torch.Tensor:
-    """时序滚动标准差。使用 cumsum 公式避免 unfold 开销。"""
-    if d <= 1: return torch.zeros_like(x)
-    B, T = x.shape
-    # cumsum 公式: Var(X) = E[X^2] - E[X]^2
-    x2 = x * x
-    pad = torch.zeros((B, d - 1), device=x.device, dtype=x.dtype)
-    cs = torch.cumsum(torch.cat([pad, x], dim=1), dim=1)
-    cs2 = torch.cumsum(torch.cat([pad, x2], dim=1), dim=1)
-    # 滚动求和
-    roll_sum = cs[:, d:] - cs[:, :-d]
-    roll_sum2 = cs2[:, d:] - cs2[:, :-d]
-    mean = roll_sum / d
-    var = roll_sum2 / d - mean * mean
-    return torch.sqrt(var.clamp(min=1e-12))
-
-
-def _ts_mean(x: torch.Tensor, d: int) -> torch.Tensor:
-    """时序滚动均值。使用 cumsum 公式避免 unfold 开销。"""
-    if d <= 1: return x
-    B, T = x.shape
-    pad = torch.zeros((B, d - 1), device=x.device, dtype=x.dtype)
-    cs = torch.cumsum(torch.cat([pad, x], dim=1), dim=1)
-    roll_sum = cs[:, d:] - cs[:, :-d]
-    return roll_sum / d
-
-
-def _ts_corr(x: torch.Tensor, y: torch.Tensor, d: int) -> torch.Tensor:
-    """两因子滚动 Pearson 相关系数。使用 cumsum 公式避免 unfold。"""
-    if d <= 1: return torch.zeros_like(x)
-    B, T = x.shape
-    pad = torch.zeros((B, d - 1), device=x.device, dtype=x.dtype)
-    xy = x * y
-    x2 = x * x
-    y2 = y * y
-    cs_x = torch.cumsum(torch.cat([pad, x], dim=1), dim=1)
-    cs_y = torch.cumsum(torch.cat([pad, y], dim=1), dim=1)
-    cs_xy = torch.cumsum(torch.cat([pad, xy], dim=1), dim=1)
-    cs_x2 = torch.cumsum(torch.cat([pad, x2], dim=1), dim=1)
-    cs_y2 = torch.cumsum(torch.cat([pad, y2], dim=1), dim=1)
-    # 滚动求和
-    sx = cs_x[:, d:] - cs_x[:, :-d]
-    sy = cs_y[:, d:] - cs_y[:, :-d]
-    sxy = cs_xy[:, d:] - cs_xy[:, :-d]
-    sx2 = cs_x2[:, d:] - cs_x2[:, :-d]
-    sy2 = cs_y2[:, d:] - cs_y2[:, :-d]
-    # Pearson: cov / (std_x * std_y)
-    cov = sxy / d - (sx / d) * (sy / d)
-    var_x = (sx2 / d - (sx / d) ** 2).clamp(min=1e-12)
-    var_y = (sy2 / d - (sy / d) ** 2).clamp(min=1e-12)
-    return cov / (torch.sqrt(var_x) * torch.sqrt(var_y) + 1e-8)
-
-
-def _cs_rank(x: torch.Tensor) -> torch.Tensor:
-    """截面排名：将每只股票在当日所有股票中的排名归一化到 [0, 1]。"""
-    return x.argsort(dim=0).argsort(0).float() / (x.shape[0] + 1e-6)
-
-
-def _cs_zscore(x: torch.Tensor) -> torch.Tensor:
-    """截面 z-score 标准化：保留幅度信息，不同于 rank 只保留排序。"""
-    mean = torch.nanmean(x, dim=0, keepdim=True)
-    std = torch.nanmean((x - mean) ** 2, dim=0, keepdim=True).sqrt().clamp(min=1e-6)
-    return (x - mean) / std
-
-
-def _ts_argmin(x: torch.Tensor, d: int) -> torch.Tensor:
-    """时序 argmin：过去 d 天内最小值出现的位置（归一化到 [0, 1]）。"""
-    if d <= 1: return torch.zeros_like(x)
-    B, T = x.shape
-    pad = torch.full((B, d - 1), float('inf'), device=x.device)
-    x_pad = torch.cat([pad, x], dim=1)
-    windows = x_pad.unfold(1, d, 1)
-    # argmin 位置归一化
-    idx = windows.argmin(dim=-1).float() / (d - 1)
-    return idx
-
-
-def _ts_argmax(x: torch.Tensor, d: int) -> torch.Tensor:
-    """时序 argmax：过去 d 天内最大值出现的位置（归一化到 [0, 1]）。"""
-    if d <= 1: return torch.zeros_like(x)
-    B, T = x.shape
-    pad = torch.full((B, d - 1), float('-inf'), device=x.device)
-    x_pad = torch.cat([pad, x], dim=1)
-    windows = x_pad.unfold(1, d, 1)
-    idx = windows.argmax(dim=-1).float() / (d - 1)
-    return idx
-
-
-def _ts_sum(x: torch.Tensor, d: int) -> torch.Tensor:
-    """时序滚动求和。使用 cumsum 公式避免 unfold 开销。"""
-    if d <= 1: return x
-    B, T = x.shape
-    pad = torch.zeros((B, d - 1), device=x.device, dtype=x.dtype)
-    cs = torch.cumsum(torch.cat([pad, x], dim=1), dim=1)
-    return cs[:, d:] - cs[:, :-d]
-
-
-def _signedpower(x: torch.Tensor) -> torch.Tensor:
-    """WQ101 核心算子：sign(x) * |x|^0.5，非线性信号放大。"""
-    return torch.sign(x) * torch.pow(torch.abs(x) + 1e-8, 0.5)
-
+# ---- 基础算子（无依赖，必须最先定义） ----
 
 @torch.jit.script
 def _ts_delay(x: torch.Tensor, d: int) -> torch.Tensor:
@@ -159,10 +10,18 @@ def _ts_delay(x: torch.Tensor, d: int) -> torch.Tensor:
     pad = torch.zeros((x.shape[0], d), device=x.device)
     return torch.cat([pad, x[:, :-d]], dim=1)
 
+
+@torch.jit.script
+def _signedpower(x: torch.Tensor) -> torch.Tensor:
+    """WQ101 核心算子：sign(x) * |x|^0.5，非线性信号放大。"""
+    return torch.sign(x) * torch.pow(torch.abs(x) + 1e-8, 0.5)
+
+
 @torch.jit.script
 def _op_gate(condition: torch.Tensor, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     mask = (condition > 0).float()
     return mask * x + (1.0 - mask) * y
+
 
 @torch.jit.script
 def _op_jump(x: torch.Tensor) -> torch.Tensor:
@@ -190,12 +49,184 @@ def _op_jump(x: torch.Tensor) -> torch.Tensor:
     result = torch.where(nan_mask, torch.full_like(result, float('nan')), result)
     return result
 
+
 @torch.jit.script
 def _op_decay(x: torch.Tensor) -> torch.Tensor:
     # 权重归一化，避免深层嵌套时信号爆炸
     w0, w1, w2 = 1.0, 0.8, 0.6
     s = w0 + w1 + w2
     return (w0 * x + w1 * _ts_delay(x, 1) + w2 * _ts_delay(x, 2)) / s
+
+
+# ---- 时序算子 ----
+
+@torch.jit.script
+def _ts_delta(x: torch.Tensor, d: int) -> torch.Tensor:
+    """时序变化量：x(t) - x(t-d)。"""
+    return x - _ts_delay(x, d)
+
+
+@torch.jit.script
+def _ts_decay_linear(x: torch.Tensor, d: int) -> torch.Tensor:
+    """线性衰减均线：近期权重更大。"""
+    if d <= 1: return x
+    B, T = x.shape
+    pad = torch.zeros((B, d - 1), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    windows = x_pad.unfold(1, d, 1)
+    w = torch.arange(1, d + 1, device=x.device, dtype=x.dtype)
+    w = w / w.sum()
+    return (windows * w).sum(dim=-1)
+
+
+@torch.jit.script
+def _ts_rank(x: torch.Tensor, d: int) -> torch.Tensor:
+    """时序排名百分位：当前值在过去 d 天中的排名归一化到 [0, 1]。"""
+    if d <= 1: return torch.zeros_like(x)
+    B, T = x.shape
+    pad = torch.zeros((B, d - 1), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    windows = x_pad.unfold(1, d, 1)
+    current = x.unsqueeze(-1)
+    rank = (windows < current).sum(dim=-1).float()
+    return rank / (d - 1)
+
+
+@torch.jit.script
+def _ts_min(x: torch.Tensor, d: int) -> torch.Tensor:
+    """时序滚动最小值。"""
+    if d <= 1: return x
+    B, T = x.shape
+    pad = torch.full((B, d - 1), float('inf'), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    windows = x_pad.unfold(1, d, 1)
+    return windows.min(dim=-1)[0]
+
+
+@torch.jit.script
+def _ts_max(x: torch.Tensor, d: int) -> torch.Tensor:
+    """时序滚动最大值。"""
+    if d <= 1: return x
+    B, T = x.shape
+    pad = torch.full((B, d - 1), float('-inf'), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    windows = x_pad.unfold(1, d, 1)
+    return windows.max(dim=-1)[0]
+
+
+@torch.jit.script
+def _ts_std(x: torch.Tensor, d: int) -> torch.Tensor:
+    """时序滚动标准差。使用 cumsum 公式避免 unfold 开销。"""
+    if d <= 1: return torch.zeros_like(x)
+    B, T = x.shape
+    # cumsum 公式: Var(X) = E[X^2] - E[X]^2
+    x2 = x * x
+    pad = torch.zeros((B, d - 1), device=x.device, dtype=x.dtype)
+    cs = torch.cumsum(torch.cat([pad, x], dim=1), dim=1)
+    cs2 = torch.cumsum(torch.cat([pad, x2], dim=1), dim=1)
+    # 滚动求和
+    roll_sum = cs[:, d:] - cs[:, :-d]
+    roll_sum2 = cs2[:, d:] - cs2[:, :-d]
+    mean = roll_sum / d
+    var = roll_sum2 / d - mean * mean
+    return torch.sqrt(var.clamp(min=1e-12))
+
+
+@torch.jit.script
+def _ts_mean(x: torch.Tensor, d: int) -> torch.Tensor:
+    """时序滚动均值。使用 cumsum 公式避免 unfold 开销。"""
+    if d <= 1: return x
+    B, T = x.shape
+    pad = torch.zeros((B, d - 1), device=x.device, dtype=x.dtype)
+    cs = torch.cumsum(torch.cat([pad, x], dim=1), dim=1)
+    roll_sum = cs[:, d:] - cs[:, :-d]
+    return roll_sum / d
+
+
+@torch.jit.script
+def _ts_corr(x: torch.Tensor, y: torch.Tensor, d: int) -> torch.Tensor:
+    """两因子滚动 Pearson 相关系数。使用 cumsum 公式避免 unfold。"""
+    if d <= 1: return torch.zeros_like(x)
+    B, T = x.shape
+    pad = torch.zeros((B, d - 1), device=x.device, dtype=x.dtype)
+    xy = x * y
+    x2 = x * x
+    y2 = y * y
+    cs_x = torch.cumsum(torch.cat([pad, x], dim=1), dim=1)
+    cs_y = torch.cumsum(torch.cat([pad, y], dim=1), dim=1)
+    cs_xy = torch.cumsum(torch.cat([pad, xy], dim=1), dim=1)
+    cs_x2 = torch.cumsum(torch.cat([pad, x2], dim=1), dim=1)
+    cs_y2 = torch.cumsum(torch.cat([pad, y2], dim=1), dim=1)
+    # 滚动求和
+    sx = cs_x[:, d:] - cs_x[:, :-d]
+    sy = cs_y[:, d:] - cs_y[:, :-d]
+    sxy = cs_xy[:, d:] - cs_xy[:, :-d]
+    sx2 = cs_x2[:, d:] - cs_x2[:, :-d]
+    sy2 = cs_y2[:, d:] - cs_y2[:, :-d]
+    # Pearson: cov / (std_x * std_y)
+    cov = sxy / d - (sx / d) * (sy / d)
+    var_x = (sx2 / d - (sx / d) ** 2).clamp(min=1e-12)
+    var_y = (sy2 / d - (sy / d) ** 2).clamp(min=1e-12)
+    return cov / (torch.sqrt(var_x) * torch.sqrt(var_y) + 1e-8)
+
+
+@torch.jit.script
+def _ts_argmin(x: torch.Tensor, d: int) -> torch.Tensor:
+    """时序 argmin：过去 d 天内最小值出现的位置（归一化到 [0, 1]）。"""
+    if d <= 1: return torch.zeros_like(x)
+    B, T = x.shape
+    pad = torch.full((B, d - 1), float('inf'), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    windows = x_pad.unfold(1, d, 1)
+    # argmin 位置归一化
+    idx = windows.argmin(dim=-1).float() / (d - 1)
+    return idx
+
+
+@torch.jit.script
+def _ts_argmax(x: torch.Tensor, d: int) -> torch.Tensor:
+    """时序 argmax：过去 d 天内最大值出现的位置（归一化到 [0, 1]）。"""
+    if d <= 1: return torch.zeros_like(x)
+    B, T = x.shape
+    pad = torch.full((B, d - 1), float('-inf'), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    windows = x_pad.unfold(1, d, 1)
+    idx = windows.argmax(dim=-1).float() / (d - 1)
+    return idx
+
+
+@torch.jit.script
+def _ts_sum(x: torch.Tensor, d: int) -> torch.Tensor:
+    """时序滚动求和。使用 cumsum 公式避免 unfold 开销。"""
+    if d <= 1: return x
+    B, T = x.shape
+    pad = torch.zeros((B, d - 1), device=x.device, dtype=x.dtype)
+    cs = torch.cumsum(torch.cat([pad, x], dim=1), dim=1)
+    return cs[:, d:] - cs[:, :-d]
+
+
+# ---- 截面算子 ----
+
+@torch.jit.script
+def _cs_rank(x: torch.Tensor) -> torch.Tensor:
+    """截面排名：将每只股票在当日所有股票中的排名归一化到 [0, 1]。"""
+    return x.argsort(dim=0).argsort(0).float() / (x.shape[0] + 1e-6)
+
+
+@torch.jit.script
+def _cs_zscore(x: torch.Tensor) -> torch.Tensor:
+    """截面 z-score 标准化：保留幅度信息，不同于 rank 只保留排序。"""
+    valid = ~torch.isnan(x)
+    x_safe = torch.where(valid, x, torch.zeros_like(x))
+    n = valid.float().sum(dim=0, keepdim=True).clamp(min=1.0)
+    mean = x_safe.sum(dim=0, keepdim=True) / n
+    var = (x_safe * x_safe).sum(dim=0, keepdim=True) / n - mean * mean
+    std = var.sqrt().clamp(min=1e-6)
+    result = (x_safe - mean) / std
+    return torch.where(valid, result, torch.zeros_like(result))
+
+
+# ---- 算子注册表 ----
 
 OPS_CONFIG = [
     # ---- 算术算子 ----
