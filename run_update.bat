@@ -1,0 +1,1 @@
+python run_daily.py --update-only

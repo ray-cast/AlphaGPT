@@ -426,6 +426,13 @@ class AshareDataLoader:
         # 10. 计算因子
         self.feat_tensor = FeatureEngineer.compute_features(self.raw_data_cache)
 
+        # 10.0 停牌日因子置 NaN：ffill 导致停牌日产生虚假因子值（RET=0, VOL_CHG=0 等），
+        #     必须显式标记为无效，防止模型学习到停牌日的伪造信号
+        suspended = self.raw_data_cache.get("suspended")
+        if suspended is not None:
+            # [N, T] → [N, 1, T] broadcast over feature dim → [N, F, T]
+            self.feat_tensor.masked_fill_(suspended.unsqueeze(1), float('nan'))
+
         # 10.1 预计算 NaN mask 和清洗版 feat
         self.nan_mask = torch.isnan(self.feat_tensor).any(dim=1)   # [N, T] bool
         self.clean_feat_tensor = self.feat_tensor.nan_to_num(nan=0.0)
