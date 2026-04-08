@@ -85,13 +85,13 @@ def _run_report(eng):
     metrics, daily_ret, bench_daily, oos_dates = report.evaluate(alpha_values, split_type="test")
     print("\n>>> 测试集评估")
     report.print_report(metrics, oos_dates)
-    report.plot_equity(daily_ret, bench_daily, oos_dates, suffix="_test")
+    report.plot_equity(daily_ret, bench_daily, oos_dates, suffix="_test", metrics=metrics)
 
     # 验证集评估
     metrics, daily_ret, bench_daily, oos_dates = report.evaluate(alpha_values, split_type="val")
     print("\n>>> 验证集评估")
     report.print_report(metrics, oos_dates)
-    report.plot_equity(daily_ret, bench_daily, oos_dates, suffix="_val")
+    report.plot_equity(daily_ret, bench_daily, oos_dates, suffix="_val", metrics=metrics)
 
 
 def run_signal_only():
@@ -152,11 +152,11 @@ def run_signal_only():
     metrics, daily_ret, bench_daily, oos_dates = report.evaluate(alpha_values, split_type="test")
     print("\n>>> 测试集评估")
     report.print_report(metrics, oos_dates)
-    report.plot_equity(daily_ret, bench_daily, oos_dates, suffix="_test")
+    report.plot_equity(daily_ret, bench_daily, oos_dates, suffix="_test", metrics=metrics)
     metrics, daily_ret, bench_daily, oos_dates = report.evaluate(alpha_values, split_type="val")
     print("\n>>> 验证集评估")
     report.print_report(metrics, oos_dates)
-    report.plot_equity(daily_ret, bench_daily, oos_dates, suffix="_val")
+    report.plot_equity(daily_ret, bench_daily, oos_dates, suffix="_val", metrics=metrics)
 
     # 打印今日 Top30
     print_top_picks(loader, alpha_values)

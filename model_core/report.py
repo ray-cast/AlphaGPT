@@ -38,6 +38,15 @@ class StrategyReport:
         oos_dates = loader.dates[start:end]
         T = len(oos_dates)
 
+        if T == 0:
+            empty_metrics = {k: 0.0 for k in [
+                "total_ret", "ann_ret", "ann_vol", "sharpe", "max_dd",
+                "max_dd_start", "max_dd_end", "calmar", "bench_total",
+                "bench_ann", "excess_total", "avg_turnover", "win_rate",
+            ]}
+            empty_metrics.update({"yearly_dd": {}, "trading_days": 0})
+            return empty_metrics, np.array([]), np.array([]), oos_dates
+
         # 复用训练回测引擎，确保报告结果与训练目标完全一致
         bt = AshareBacktest()
         _, _, daily_pnl, turnover = bt.evaluate(
@@ -82,7 +91,7 @@ class StrategyReport:
         running_max = np.maximum.accumulate(equity)
         peak_before_trough = running_max[max_dd_end]
         # 回撤起点 = 该谷值之前最后一个净值为 peak_before_trough 的位置
-        peak_indices = np.where(equity[:max_dd_end + 1] == peak_before_trough)[0]
+        peak_indices = np.where(np.isclose(equity[:max_dd_end + 1], peak_before_trough))[0]
         max_dd_start = int(peak_indices[-1]) if len(peak_indices) > 0 else 0
         calmar = ann_ret / (max_dd + 1e-6)
 
@@ -104,9 +113,7 @@ class StrategyReport:
         bench_ann = bench_equity[-1] ** (252 / T) - 1 if T > 0 else 0.0
 
         # 超额统计（用策略净值/基准净值，而非差值累乘）
-        strategy_equity = np.cumprod(1 + daily_ret)
-        benchmark_equity = np.cumprod(1 + bench_daily)
-        excess_equity = strategy_equity / np.maximum(benchmark_equity, 1e-12)
+        excess_equity = equity / np.maximum(bench_equity, 1e-12)
         excess_total = excess_equity[-1] - 1
 
         avg_turnover = turnover.mean().item()
@@ -162,7 +169,7 @@ class StrategyReport:
                 print(f"    {yr}  : {dd_val:.2%}")
         print("=" * 60)
 
-    def plot_equity(self, daily_ret, bench_daily, oos_dates, suffix=""):
+    def plot_equity(self, daily_ret, bench_daily, oos_dates, suffix="", metrics=None):
         """绘制策略 vs 基准净值曲线，含回撤子图。"""
         equity = np.cumprod(1 + daily_ret)
         bench_equity = np.cumprod(1 + bench_daily)
@@ -188,7 +195,7 @@ class StrategyReport:
         dd_peak_idx = int(np.argmax(dd))
         running_max = np.maximum.accumulate(equity)
         peak_val = running_max[dd_peak_idx]
-        peak_indices = np.where(equity[:dd_peak_idx + 1] == peak_val)[0]
+        peak_indices = np.where(np.isclose(equity[:dd_peak_idx + 1], peak_val))[0]
         dd_start_idx = int(peak_indices[-1]) if len(peak_indices) > 0 else 0
 
         ax1.axvspan(dd_start_idx, dd_peak_idx, color="red", alpha=0.15, label="Max Drawdown")
@@ -204,12 +211,18 @@ class StrategyReport:
             arrowprops=dict(arrowstyle="->", color="red", lw=0.8),
         )
 
-        ann_ret = (equity[-1] ** (252 / len(equity)) - 1) if len(equity) > 0 else 0
-        sharpe_val = 0
-        if np.std(daily_ret) > 0:
-            sharpe_val = (np.mean(daily_ret) * 252 - 0.02) / (np.std(daily_ret) * np.sqrt(252) + 1e-6)
+        if metrics is not None:
+            ann_ret_pct = metrics["ann_ret"]
+            sharpe_val = metrics["sharpe"]
+            max_dd_pct = metrics["max_dd"]
+        else:
+            ann_ret_pct = (equity[-1] ** (252 / len(equity)) - 1) if len(equity) > 0 else 0
+            sharpe_val = 0
+            if np.std(daily_ret) > 0:
+                ann_vol = np.std(daily_ret) * np.sqrt(252)
+                sharpe_val = (ann_ret_pct - 0.02) / (ann_vol + 1e-6)
 
-        ax1.set_title(f"OOS Backtest: Ann Ret {ann_ret:.1%} | Sharpe {sharpe_val:.2f} | Max DD {max_dd_pct:.1%}")
+        ax1.set_title(f"OOS Backtest: Ann Ret {ann_ret_pct:.1%} | Sharpe {sharpe_val:.2f} | Max DD {max_dd_pct:.1%}")
         ax1.legend(loc="upper left", fontsize=8)
         ax1.grid(True)
         ax1.set_ylabel("Equity")
