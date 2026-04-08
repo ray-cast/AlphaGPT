@@ -7,7 +7,7 @@ import torch.jit
 @torch.jit.script
 def _ts_delay(x: torch.Tensor, d: int) -> torch.Tensor:
     if d == 0: return x
-    pad = torch.zeros((x.shape[0], d), device=x.device)
+    pad = torch.full((x.shape[0], d), float('nan'), device=x.device)
     return torch.cat([pad, x[:, :-d]], dim=1)
 
 
@@ -71,7 +71,7 @@ def _ts_decay_linear(x: torch.Tensor, d: int) -> torch.Tensor:
     """线性衰减均线：近期权重更大。"""
     if d <= 1: return x
     B, T = x.shape
-    pad = torch.zeros((B, d - 1), device=x.device)
+    pad = torch.full((B, d - 1), float('nan'), device=x.device)
     x_pad = torch.cat([pad, x], dim=1)
     windows = x_pad.unfold(1, d, 1)
     w = torch.arange(1, d + 1, device=x.device, dtype=x.dtype)
@@ -84,12 +84,15 @@ def _ts_rank(x: torch.Tensor, d: int) -> torch.Tensor:
     """时序排名百分位：当前值在过去 d 天中的排名归一化到 [0, 1]。"""
     if d <= 1: return torch.zeros_like(x)
     B, T = x.shape
-    pad = torch.zeros((B, d - 1), device=x.device)
+    pad = torch.full((B, d - 1), float('nan'), device=x.device)
     x_pad = torch.cat([pad, x], dim=1)
     windows = x_pad.unfold(1, d, 1)
     current = x.unsqueeze(-1)
     rank = (windows < current).sum(dim=-1).float()
-    return rank / (d - 1)
+    result = rank / (d - 1)
+    # 前 d-1 个窗口含 NaN padding，比较运算不传播 NaN，需显式置 NaN
+    result[:, :d - 1] = float('nan')
+    return result
 
 
 @torch.jit.script
@@ -129,7 +132,10 @@ def _ts_std(x: torch.Tensor, d: int) -> torch.Tensor:
     roll_sum2 = cs2[:, d:] - cs2[:, :-d]
     mean = roll_sum / d
     var = roll_sum2 / d - mean * mean
-    return torch.sqrt(var.clamp(min=1e-12))
+    result = torch.sqrt(var.clamp(min=1e-12))
+    # 前 d-1 个位置窗口不足 d，除数错误，显式置 NaN
+    result[:, :d - 1] = float('nan')
+    return result
 
 
 @torch.jit.script
@@ -140,7 +146,9 @@ def _ts_mean(x: torch.Tensor, d: int) -> torch.Tensor:
     pad = torch.zeros((B, d - 1), device=x.device, dtype=x.dtype)
     cs = torch.cumsum(torch.cat([pad, x], dim=1), dim=1)
     roll_sum = cs[:, d:] - cs[:, :-d]
-    return roll_sum / d
+    result = roll_sum / d
+    result[:, :d - 1] = float('nan')
+    return result
 
 
 @torch.jit.script
@@ -167,7 +175,9 @@ def _ts_corr(x: torch.Tensor, y: torch.Tensor, d: int) -> torch.Tensor:
     cov = sxy / d - (sx / d) * (sy / d)
     var_x = (sx2 / d - (sx / d) ** 2).clamp(min=1e-12)
     var_y = (sy2 / d - (sy / d) ** 2).clamp(min=1e-12)
-    return cov / (torch.sqrt(var_x) * torch.sqrt(var_y) + 1e-8)
+    result = cov / (torch.sqrt(var_x) * torch.sqrt(var_y) + 1e-8)
+    result[:, :d - 1] = float('nan')
+    return result
 
 
 @torch.jit.script
@@ -202,7 +212,9 @@ def _ts_sum(x: torch.Tensor, d: int) -> torch.Tensor:
     B, T = x.shape
     pad = torch.zeros((B, d - 1), device=x.device, dtype=x.dtype)
     cs = torch.cumsum(torch.cat([pad, x], dim=1), dim=1)
-    return cs[:, d:] - cs[:, :-d]
+    result = cs[:, d:] - cs[:, :-d]
+    result[:, :d - 1] = float('nan')
+    return result
 
 
 # ---- 截面算子 ----
