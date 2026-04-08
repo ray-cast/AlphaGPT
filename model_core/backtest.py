@@ -105,7 +105,7 @@ class AshareBacktest:
         return net_pnl.sum(dim=0) / self.top_n
 
     def _compute_score(self, daily_pnl, factors, target_ret, valid_mask, position, N_stocks, T_len):
-        """计算综合适应度：Sortino + IC - 回撤惩罚。
+        """计算综合适应度：归一化加权 Sortino + IC - 回撤/活跃度/换手惩罚。
 
         Returns:
             (fitness: tensor, cum_ret: float)
@@ -124,21 +124,35 @@ class AshareBacktest:
         else:
             down_std = daily_pnl.std() + 1e-6
         sortino = mean_ret / down_std * (252 ** 0.5)
-        sortino_score = torch.clamp(sortino, -3.0, 5.0)
+        sortino_norm = torch.clamp(sortino, -3.0, 5.0) / 5.0  # [-0.6, 1.0]
 
-        # 回撤惩罚（连续化，梯度友好）
+        # 回撤惩罚（2% 起罚，梯度友好）
         cum_curve = torch.cumsum(daily_pnl, dim=0)
         running_max = torch.cummax(cum_curve, dim=0)[0]
         drawdown = cum_curve - running_max
         max_dd = drawdown.min()
-        dd_penalty = torch.min(torch.relu(-max_dd - 0.05) * 2.0, torch.tensor(2.0, device=daily_pnl.device))
+        dd_penalty = torch.min(
+            torch.relu(-max_dd - 0.02) * 3.0,
+            torch.tensor(2.0, device=daily_pnl.device)
+        )
 
-        # IC 奖励（截面预测能力）
-        ic_bonus = 0.0
+        # IC 奖励（截面预测能力，线性 + 硬截断）
+        ic_norm = 0.0
         if N_stocks > 10:
-            ic_bonus = self._vectorized_ic(factors, target_ret, valid_mask, T_len, N_stocks)
+            raw_ic = self._vectorized_ic_raw(factors, target_ret, valid_mask)
+            ic_norm = torch.clamp(raw_ic * 5.0, -1.0, 1.0)
 
-        fitness = sortino_score + ic_bonus - dd_penalty - activity_penalty
+        # 换手率惩罚（日均换手超 30% 起罚，封顶 1.0）
+        turnover = self._compute_turnover(position, valid_mask)
+        avg_turnover = turnover.sum() / (active_days + 1e-6) / self.top_n
+        turnover_penalty = torch.min(
+            torch.relu(avg_turnover - 0.3) * 1.0,
+            torch.tensor(1.0, device=daily_pnl.device)
+        )
+
+        # 加权合成：sortino 3x + IC 1.5x - 各惩罚项
+        fitness = 3.0 * sortino_norm + 1.5 * ic_norm - dd_penalty - activity_penalty - turnover_penalty
+        fitness = torch.clamp(fitness, -5.0, 5.0)
         return fitness, cum_ret.item()
 
     @staticmethod
@@ -260,16 +274,10 @@ class AshareBacktest:
         return torch.from_numpy(pos_np).to(device=scores.device, dtype=scores.dtype)
 
     @staticmethod
-    def _vectorized_ic(factors, target_ret, valid_mask, T_len, N_stocks):
-        """向量化计算逐日 Pearson 秩相关 IC（近似 Spearman）。
+    def _vectorized_ic_raw(factors, target_ret, valid_mask, T_len, N_stocks):
+        """向量化计算逐日 Pearson IC，返回原始均值（由调用方决定映射方式）。"""
+        n_valid = valid_mask.float().sum(dim=0).clamp(min=1)
 
-        直接用 Pearson 相关系数代替 Spearman，避免 argsort 开销。
-        对于截面选股来说两者高度一致（同调单调变换不改变排序）。
-        """
-        # 每日有效股票数
-        n_valid = valid_mask.float().sum(dim=0).clamp(min=1)  # [T_len]
-
-        # 将 invalid 位置置零并中心化（只对 valid 位置）
         f_c = torch.where(valid_mask, factors, 0.0)
         r_c = torch.where(valid_mask, target_ret, 0.0)
         f_mean = f_c.sum(dim=0) / n_valid
@@ -277,20 +285,18 @@ class AshareBacktest:
         f_c = torch.where(valid_mask, f_c - f_mean.unsqueeze(0), 0.0)
         r_c = torch.where(valid_mask, r_c - r_mean.unsqueeze(0), 0.0)
 
-        # 逐日 Pearson 相关系数
         cov = (f_c * r_c).sum(dim=0)
         std_f = (f_c.pow(2).sum(dim=0)).sqrt().clamp(min=1e-6)
         std_r = (r_c.pow(2).sum(dim=0)).sqrt().clamp(min=1e-6)
         daily_ic = cov / (std_f * std_r)
 
-        # 过滤无效天
         valid_day = (n_valid >= 10) & (std_f > 1e-3) & (std_r > 1e-3)
         ic_count = valid_day.float().sum()
         if ic_count < 1:
-            return 0.0
+            return torch.tensor(0.0, device=factors.device)
 
         avg_ic = (daily_ic * valid_day.float()).sum() / ic_count
-        return torch.tanh(avg_ic * 10.0).item()
+        return avg_ic
 
     @staticmethod
     def _rolling_mean_1d(x, window):
