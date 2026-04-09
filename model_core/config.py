@@ -54,6 +54,8 @@ class ModelConfig:
     # ---------- 探索与多样性 ----------
     ENTROPY_COEF_START = 0.15      # 起始 entropy 系数
     ENTROPY_COEF_END = 0.01        # 终止 entropy 系数
+    EPS_GREEDY_START = 0.1         # epsilon-greedy 起始值
+    EPS_GREEDY_END = 0.01          # epsilon-greedy 终止值
 
     # ---------- 因子维度 ----------
     INPUT_DIM = 23
