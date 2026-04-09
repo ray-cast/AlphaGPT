@@ -204,12 +204,9 @@ class AshareBacktest:
         # 跌停掩码转 numpy
         limit_down_np = limit_down.cpu().numpy() if limit_down is not None else None
 
-        # numpy topk（按天取前 k 名，按分数降序排列）
+        # 直接复用已排好的排名表取前 k 名（sorted_idx_np 降序，-inf 排末尾）
         k = min(top_n * 2, N_stocks)
-        topk_np = np.zeros((k, T_len), dtype=np.int64)
-        for t_col in range(T_len):
-            # argsort 降序取前 k 个（N=300 时 ~10μs，可接受）
-            topk_np[:, t_col] = np.argsort(-scores_np[:, t_col])[:k]
+        topk_np = sorted_idx_np[:k, :]
         pos_np = np.zeros((N_stocks, T_len), dtype=np.float32)
 
         # ---- 用 boolean mask 跟踪持仓 ----
