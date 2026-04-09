@@ -69,14 +69,6 @@ def build_ipo_mask(
     return mask.to(device=ModelConfig.DEVICE)
 
 
-def _limit_pct_for_code(code: str) -> float:
-    """从股票代码前缀推断涨跌停百分比。"""
-    c = code.split(".")[0]
-    if c.startswith("300") or c.startswith("301") or c.startswith("688"):
-        return ModelConfig.PRICE_LIMIT_GEM   # 0.20
-    return ModelConfig.PRICE_LIMIT_MAIN       # 0.10
-
-
 class AshareDataLoader:
     """从 CSV 文件加载全市场A股日线数据，转为 PyTorch tensors。
 
@@ -337,42 +329,7 @@ class AshareDataLoader:
         if pe_ttm_t is not None and pb_t is not None:
             self.raw_data_cache["roe"] = pb_t / pe_ttm_t
 
-        # 6. 涨跌停掩码
-        pre_close_t = _col_to_tensor("pre_close")
-        if pre_close_t is None:
-            close_t = self.raw_data_cache["close"]
-            pre_close_t = torch.zeros_like(close_t)
-            pre_close_t[:, 1:] = close_t[:, :-1]
-            pre_close_t[:, 0] = close_t[:, 0]
-
-        close_t = self.raw_data_cache["close"]
-        pct_change = (close_t - pre_close_t) / (pre_close_t.abs() + 1e-8)
-        thresholds = torch.tensor(
-            [_limit_pct_for_code(code) for code in loaded_codes],
-            dtype=torch.float32, device=ModelConfig.DEVICE,
-        ).unsqueeze(1)  # [N, 1]
-
-        # ST 检测：主板股票若反复在 ±5% 附近收于极值价（最高/最低），疑似 ST
-        high_t = self.raw_data_cache["high"]
-        low_t = self.raw_data_cache["low"]
-        at_ceil_5 = (pct_change >= 0.045) & ((high_t - close_t) / (close_t + 1e-8) < 0.002)
-        at_floor_5 = (pct_change <= -0.045) & ((close_t - low_t) / (close_t + 1e-8) < 0.002)
-        st_score = (at_ceil_5 | at_floor_5).float().sum(dim=1)  # [N]
-        is_main = (thresholds.squeeze() == ModelConfig.PRICE_LIMIT_MAIN)  # [N]
-        is_st = (st_score >= 3) & is_main
-        if is_st.any():
-            thresholds[is_st] = ModelConfig.PRICE_LIMIT_ST
-
-        limit_up = pct_change >= (thresholds - 0.005)
-        limit_down = pct_change <= (-thresholds + 0.005)
-        limit_up[:, 0] = False
-        limit_down[:, 0] = False
-        limit_up[suspended_mask] = False
-        limit_down[suspended_mask] = False
-        self.raw_data_cache["limit_up"] = limit_up
-        self.raw_data_cache["limit_down"] = limit_down
-
-        # 6.5 后复权：用 pct_chg 构造除权除息不变的调整价格
+        # 6. 后复权：用 pct_chg 构造除权除息不变的调整价格
         #     adj_close[t] = close[0] * cumprod(1 + pct_chg/100)
         #     adj_open/high/low = adj_close * (x / close)  日内比率不受除权影响
         #     必须在涨跌停检测之后执行（涨跌停依赖原始价格）
@@ -411,17 +368,6 @@ class AshareDataLoader:
                 self.dates = self.dates[s:]
                 for key in self.raw_data_cache:
                     self.raw_data_cache[key] = self.raw_data_cache[key][:, s:]
-
-        # 7.1 印花税时间分段（2023-08-28 由千1降至千0.5）
-        stamp_tax = torch.full(
-            (len(self.dates),), ModelConfig.STAMP_TAX_RATE_OLD,
-            dtype=torch.float32, device=ModelConfig.DEVICE,
-        )
-        for i, d in enumerate(self.dates):
-            if int(d) >= int(ModelConfig.STAMP_TAX_CHANGE_DATE):
-                stamp_tax[i:] = ModelConfig.STAMP_TAX_RATE_NEW
-                break
-        self.raw_data_cache["stamp_tax_rate"] = stamp_tax  # [T]
 
         # 8. 构建次新股掩码（替代原成分股掩码，消除新股影响）
         ipo_mask = build_ipo_mask(loaded_codes, list_dates, self.dates)

@@ -41,16 +41,13 @@ def _compute_turnover(position: torch.Tensor, valid_mask: torch.Tensor) -> torch
 
 @torch.jit.script
 def _compute_pnl(position: torch.Tensor, target_ret: torch.Tensor,
-                 stamp_tax_rate: torch.Tensor,
-                 commission: float, slippage: float,
-                 buy_cost: float, top_n: int) -> torch.Tensor:
+                 commission: float, top_n: int) -> torch.Tensor:
     """计算每日组合收益（含交易成本）。"""
     prev_pos = torch.roll(position, 1, dims=1)
     prev_pos[:, 0] = 0.0
     buy_turnover = torch.clamp(position - prev_pos, min=0.0)
     sell_turnover = torch.clamp(prev_pos - position, min=0.0)
-    sell_cost_t = (commission + stamp_tax_rate + slippage).unsqueeze(0)
-    tx_cost = buy_turnover * buy_cost + sell_turnover * sell_cost_t
+    tx_cost = (buy_turnover + sell_turnover) * commission
     gross_pnl = position * target_ret
     net_pnl = gross_pnl - tx_cost
     return net_pnl.sum(dim=0) / top_n
@@ -77,14 +74,11 @@ class AshareBacktest:
     """A股截面选股回测引擎。
 
     每个交易日对所有股票按 alpha 分值排序，做多排名前 N 只。
-    已内置 T+1 规则（通过 open-to-open target_ret 实现）、
-    佣金+印花税、涨跌停过滤、换手率过滤。
+    已内置 T+1 规则（通过 open-to-open target_ret 实现）、佣金、换手率过滤。
     """
 
     def __init__(self):
         self.commission = ModelConfig.COMMISSION_RATE
-        self.slippage = ModelConfig.SLIPPAGE_RATE
-        self.buy_cost = self.commission + self.slippage   # 买入：佣金 + 滑点
         self.min_turnover = ModelConfig.MIN_TURNOVER_RATE
         self.top_n = ModelConfig.TOP_N_STOCKS
         self.rebalance_freq = ModelConfig.REBALANCE_FREQ
@@ -106,8 +100,6 @@ class AshareBacktest:
                             torch.zeros_like(factors, dtype=torch.bool))
         constituent = raw_data.get("ipo_ok",
                             torch.ones_like(factors, dtype=torch.bool))
-        limit_up_full = raw_data.get("limit_up")
-        limit_down_full = raw_data.get("limit_down")
 
         # 按指定区间切片
         factors = factors[:, start_idx:end_idx]
@@ -115,41 +107,27 @@ class AshareBacktest:
         turnover_rate = turnover_rate[:, start_idx:end_idx]
         suspended = suspended[:, start_idx:end_idx]
         constituent = constituent[:, start_idx:end_idx]
-        limit_up = limit_up_full[:, start_idx:end_idx] if limit_up_full is not None else None
-        limit_down = limit_down_full[:, start_idx:end_idx] if limit_down_full is not None else None
 
         N_stocks, T_len = factors.shape
-
-        # 印花税按日期分段（2023-08-28 前千1，之后千0.5）
-        stamp_tax_rate_full = raw_data.get("stamp_tax_rate")
-        if stamp_tax_rate_full is not None:
-            stamp_tax_rate = stamp_tax_rate_full[start_idx:end_idx]
-        else:
-            stamp_tax_rate = torch.full((T_len,), 0.0005, device=factors.device)
 
         # 排除停牌/非成分股（NaN 信号、NaN target_ret、停牌、或非时点成分股）
         valid_mask = ~(torch.isnan(factors) | torch.isnan(target_ret) | suspended) & constituent
         tradeable = valid_mask & (turnover_rate > self.min_turnover)
         scores = torch.where(tradeable, factors, torch.tensor(float('-inf'), device=factors.device))
 
-        # 涨停过滤：涨停股票无法买入，从候选池排除
-        if limit_up is not None:
-            scores[limit_up] = float('-inf')
-
         # 构建持仓矩阵
         rank_gap = ModelConfig.REBALANCE_RANK_GAP
-        position = self._build_position(scores, valid_mask, self.top_n, rank_gap, self.rebalance_freq,
-                                        limit_down=limit_down)
+        position = self._build_position(scores, valid_mask, self.top_n, rank_gap, self.rebalance_freq)
 
         # 换手
         turnover = self._compute_turnover(position, valid_mask)
 
-        # PnL（印花税按日期分段）
-        daily_pnl = self._compute_pnl(position, target_ret, stamp_tax_rate)
+        # PnL
+        daily_pnl = self._compute_pnl(position, target_ret)
 
         # 评分
         fitness, cum_ret = self._compute_score(
-            daily_pnl, factors, target_ret, valid_mask, position, N_stocks,
+            daily_pnl, factors, target_ret, valid_mask, N_stocks,
         )
         return fitness, cum_ret, daily_pnl, turnover
 
@@ -157,46 +135,17 @@ class AshareBacktest:
         """计算换手率矩阵。停牌/非成分股的仓位变动不计换手。"""
         return _compute_turnover(position, valid_mask)
 
-    def _compute_pnl(self, position, target_ret, stamp_tax_rate):
-        """计算每日组合收益（含交易成本）。买卖费率分离，印花税按日期分段。
+    def _compute_pnl(self, position, target_ret):
+        """计算每日组合收益（含交易成本）。"""
+        return _compute_pnl(position, target_ret, self.commission, self.top_n)
 
-        Args:
-            stamp_tax_rate: [T] 每日印花税率（2023-08-28前千1，之后千0.5）
-        """
-        return _compute_pnl(position, target_ret, stamp_tax_rate,
-                            self.commission, self.slippage, self.buy_cost, self.top_n)
-
-    def _compute_score(self, daily_pnl, factors, target_ret, valid_mask, position, N_stocks):
-        """计算综合适应度：归一化加权 Sortino + IC - 回撤/活跃度惩罚。
+    def _compute_score(self, daily_pnl, factors, target_ret, valid_mask, N_stocks):
+        """计算综合适应度：IC。
 
         Returns:
             (fitness: tensor, cum_ret: float)
         """
         cum_ret = daily_pnl.sum()
-        mean_ret = daily_pnl.mean()
-
-        # 活跃度不足惩罚（软惩罚，梯度友好）
-        active_days = (position.sum(dim=0) > 0).float().sum()
-        activity_penalty = torch.relu(10.0 - active_days) * 0.1
-
-        # Sortino（只惩罚下行风险，不惩罚上行波动）
-        downside = daily_pnl[daily_pnl < 0]
-        if downside.numel() > 5:
-            down_std = downside.std() + 1e-6
-        else:
-            down_std = daily_pnl.std() + 1e-6
-        sortino = mean_ret / down_std * (252 ** 0.5)
-        sortino_norm = torch.clamp(sortino, -3.0, 5.0) / 5.0  # [-0.6, 1.0]
-
-        # 回撤惩罚（5% 起罚，梯度友好）
-        cum_curve = torch.cumsum(daily_pnl, dim=0)
-        running_max = torch.cummax(cum_curve, dim=0)[0]
-        drawdown = cum_curve - running_max
-        max_dd = drawdown.min()
-        dd_penalty = torch.min(
-            torch.relu(-max_dd - 0.05) * 3.0,
-            torch.tensor(2.0, device=daily_pnl.device)
-        )
 
         # IC 奖励（截面预测能力，线性 + 硬截断）
         ic_norm = 0.0
@@ -204,16 +153,15 @@ class AshareBacktest:
             raw_ic = _vectorized_ic_raw(factors, target_ret, valid_mask)
             ic_norm = torch.clamp(raw_ic * 5.0, -1.0, 1.0)
 
-        # 加权合成：sortino 3x + IC 2.5x - 各惩罚项
-        fitness = 3.0 * sortino_norm + 2.5 * ic_norm - dd_penalty - activity_penalty
+        fitness = ic_norm
         fitness = torch.clamp(fitness, -5.0, 5.0)
         return fitness, cum_ret.item()
 
     @staticmethod
-    def _build_position(scores, valid_mask, top_n, rank_gap, rebalance_freq=20, limit_down=None):
+    def _build_position(scores, valid_mask, top_n, rank_gap, rebalance_freq=20):
         """构建持仓矩阵（纯 torch 实现，消除 GPU↔CPU 搬运）。
 
-        非再平衡日：持仓沿用 + 剔除无效 + 向量化补缺（无内层循环）。
+        非再平衡日：持仓沿用 + 向量化补缺（无内层循环）。
         再平衡日：rank_gap 贪心换仓保留顺序逻辑（仅 top_n × rebalance_days 次迭代）。
 
         Args:
@@ -222,7 +170,6 @@ class AshareBacktest:
             top_n:         持仓数量
             rank_gap:      换仓排名阈值（0 = 每日完全重选，即关闭阈值）
             rebalance_freq: 再平衡周期（交易日），1 = 每日再平衡
-            limit_down:    [N_stocks, T] bool 跌停掩码，跌停持仓不可被替换（卖出）
         Returns:
             position:   [N_stocks, T] 持仓矩阵（0/1）
         """
@@ -233,7 +180,6 @@ class AshareBacktest:
             position = torch.zeros_like(scores)
             _, topk_idx = scores.topk(top_n, dim=0)
             position.scatter_(0, topk_idx, 1.0)
-            position[~valid_mask] = 0.0
             return position
 
         # ---- 预计算（全 torch，不离开 GPU）----
@@ -248,9 +194,6 @@ class AshareBacktest:
         held = torch.zeros(N_stocks, dtype=torch.bool, device=scores.device)
 
         for t in range(T_len):
-            # 移除无效持仓
-            held &= valid_mask[:, t]
-
             is_rebalance = (rebalance_freq <= 1) or (t == 0) or (t % rebalance_freq == 0)
             held_count = int(held.sum())
 
@@ -268,8 +211,6 @@ class AshareBacktest:
 
                 held_idx = torch.where(held)[0]
                 hr = today_ranks[held_idx].clone()
-                if limit_down is not None:
-                    hr[limit_down[held_idx, t]] = -1
                 wi = int(hr.argmax())
                 weakest = int(held_idx[wi])
                 w_rank = int(today_ranks[weakest])
@@ -280,11 +221,9 @@ class AshareBacktest:
                     if w_rank - int(today_ranks[ci]) > rank_gap:
                         held[weakest] = False
                         held[ci] = True
-                        # 重新找最弱（跌停保护）
+                        # 重新找最弱
                         held_idx = torch.where(held)[0]
                         hr = today_ranks[held_idx].clone()
-                        if limit_down is not None:
-                            hr[limit_down[held_idx, t]] = -1
                         wi = int(hr.argmax())
                         weakest = int(held_idx[wi])
                         w_rank = int(today_ranks[weakest])

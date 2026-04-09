@@ -28,17 +28,8 @@ class ModelConfig:
 
     # ---------- A股交易成本 ----------
     COMMISSION_RATE = 0.00025           # 佣金 万2.5（买卖双边）
-    SLIPPAGE_RATE = 0.001               # 滑点 千1（买卖双边）
-    TOTAL_BUY_COST = COMMISSION_RATE + SLIPPAGE_RATE
-    TOTAL_SELL_COST = COMMISSION_RATE + SLIPPAGE_RATE  # 未含印花税，需按日期取
-    STAMP_TAX_RATE_OLD = 0.001           # 印花税率（2023-08-28 前，卖出单边千1）
-    STAMP_TAX_RATE_NEW = 0.0005          # 印花税率（2023-08-28 起，卖出单边千0.5）
-    STAMP_TAX_CHANGE_DATE = "20230828"   # 印花税减半生效日
 
     # ---------- A股交易规则 ----------
-    PRICE_LIMIT_MAIN = 0.10        # 主板涨跌停 ±10%
-    PRICE_LIMIT_GEM = 0.20         # 创业板/科创板 ±20%
-    PRICE_LIMIT_ST = 0.05          # ST 股涨跌停 ±5%
     MIN_LOT_SIZE = 100             # 最小交易单位（股）
     MIN_TURNOVER_RATE = 0.005      # 最低换手率（过滤停牌/流动性不足）
 
@@ -58,7 +49,7 @@ class ModelConfig:
     EPS_GREEDY_END = 0.01          # epsilon-greedy 终止值
 
     # ---------- 因子维度 ----------
-    INPUT_DIM = 23
+    INPUT_DIM = 6
 
     # ---------- 信号输出 ----------
     SIGNAL_DIR = os.path.join(_PROJECT_ROOT, "signals")
@@ -77,7 +68,7 @@ class ModelConfig:
 
     # ---------- SFT 热启动 ----------
     SEED_FORMULA_NAMES = [         # 种子公式（名称格式，token ID 动态计算）
-        ("TS_RANK20", ["P_VALUE"]),                 # 价值因子时序排名
-        ("TS_MEAN20", ["RET"]),                     # 动量均值
+        ("TS_RANK20", ["CLOSE"]),                  # 收盘价时序排名
+        ("TS_MEAN20", ["VOL"]),                    # 成交量均值
     ]
     SFT_STEPS = 0                  # SFT 预训练步数（0 = 关闭热启动）

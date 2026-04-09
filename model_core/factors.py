@@ -451,88 +451,33 @@ class Indicators:
 
 
 class FeatureEngineer:
-    FEATURES = [
-        'RET', 'RET5', 'VOL_CHG', 'AMT_RATIO', 'TURN', 'PRESSURE', 'DEV',
-        'RSI', 'TREND', 'HL_RANGE', 'CLOSE_POS', 'P_VALUE', 'VOL_CLUSTER',
-        'ATR14', 'MFI14', 'MACD', 'BB_WIDTH', 'WILLR', 'OBV', 'CMO14',
-        'LOG_MCAP', 'ILLIQ', 'ADV20',
-    ]
+    FEATURES = ['OPEN', 'CLOSE', 'HIGH', 'LOW', 'VOL', 'VWAP']
     INPUT_DIM = len(FEATURES)
 
     @staticmethod
     def compute_features(raw_dict):
         """
-        从原始 OHLCV 数据计算 20 维因子。
+        从原始 OHLCV 数据提取 6 维基础特征。
 
-        输入 raw_dict 键: open, high, low, close, vol, amount, turnover_rate
+        输入 raw_dict 键: open, close, high, low, vol, amount
           各自形状 [num_stocks, T]
-        输出: [num_stocks, 20, T]
+        输出: [num_stocks, 6, T]
         """
-        c = raw_dict["close"]
         o = raw_dict["open"]
+        c = raw_dict["close"]
         h = raw_dict["high"]
         l = raw_dict["low"]
         v = raw_dict["vol"]
         amt = raw_dict["amount"]
-        turn = raw_dict["turnover_rate"]
-
-        # ---- 原有 13 维因子 ----
-        ret = Indicators.daily_return(c)
-        ret5 = Indicators.cumulative_return(c, 5)
-        vol_chg = Indicators.volume_change(v, 20)
-        amt_ratio = Indicators.amount_ratio(amt, 20)
-        turn_normed = robust_norm(turn)
-        pressure = Indicators.buy_sell_imbalance(c, o, h, l)
-        dev = Indicators.pump_deviation(c, 20)
-        rel_strength = Indicators.relative_strength(c, 14)
-        trend = Indicators.trend(c, 60)
-        hl_range = Indicators.hl_range(h, l, c)
-        close_pos = Indicators.close_position(c, h, l)
-        p_value = Indicators.p_value(c, raw_dict.get("pe_ttm"), raw_dict.get("roe"))
-        vol_cluster = Indicators.vol_cluster(c, 5, 20)
-
-        # ---- 新增 7 维因子 ----
-        atr14 = Indicators.atr(h, l, c, 14)
-        mfi14 = Indicators.mfi(h, l, c, v, 14)
-        macd_val = Indicators.macd(c, 12, 26)
-        bb_width = Indicators.bb_width(c, 20)
-        willr_val = Indicators.willr(h, l, c, 14)
-        obv_val = Indicators.obv(c, v)
-        cmo14 = Indicators.cmo(c, 14)
-
-        # ---- 新增 3 维因子（规模/流动性） ----
-        log_mcap = Indicators.log_mcap(raw_dict.get("total_mv"))
-        illiq = Indicators.illiq(c, amt, 20)
-        adv20 = Indicators.adv(amt, 20)
-
-        # 对数市值：无数据时用零张量（截面排名无意义但不影响其他因子）
-        if log_mcap is None:
-            log_mcap = torch.zeros_like(c)
+        vwap = amt / (v + 1e-8)
 
         features = torch.stack([
-            robust_norm(ret),          # [0]  RET
-            robust_norm(ret5),         # [1]  RET5
-            robust_norm(vol_chg),      # [2]  VOL_CHG
-            robust_norm(amt_ratio),    # [3]  AMT_RATIO
-            turn_normed,               # [4]  TURN
-            robust_norm(pressure),     # [5]  PRESSURE
-            robust_norm(dev),          # [6]  DEV
-            robust_norm(rel_strength), # [7]  RSI
-            robust_norm(trend),        # [8]  TREND
-            robust_norm(hl_range),     # [9]  HL_RANGE
-            robust_norm(close_pos),    # [10] CLOSE_POS
-            robust_norm(p_value),      # [11] P_VALUE
-            robust_norm(vol_cluster),  # [12] VOL_CLUSTER
-            robust_norm(atr14),        # [13] ATR14
-            robust_norm(mfi14),        # [14] MFI14
-            robust_norm(macd_val),     # [15] MACD
-            robust_norm(bb_width),     # [16] BB_WIDTH
-            robust_norm(willr_val),    # [17] WILLR
-            robust_norm(obv_val),      # [18] OBV
-            robust_norm(cmo14),        # [19] CMO14
-            robust_norm(log_mcap),     # [20] LOG_MCAP
-            robust_norm(illiq),        # [21] ILLIQ
-            robust_norm(adv20),        # [22] ADV20
+            robust_norm(o),    # [0]  OPEN
+            robust_norm(c),    # [1]  CLOSE
+            robust_norm(h),    # [2]  HIGH
+            robust_norm(l),    # [3]  LOW
+            robust_norm(v),    # [4]  VOL
+            robust_norm(vwap), # [5]  VWAP
         ], dim=1)
 
         # 清理 Inf（但保留 NaN 标记停牌日）
