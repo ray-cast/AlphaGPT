@@ -42,14 +42,14 @@ class StrategyReport:
             empty_metrics = {k: 0.0 for k in [
                 "total_ret", "ann_ret", "ann_vol", "sharpe", "max_dd",
                 "max_dd_start", "max_dd_end", "calmar", "bench_total",
-                "bench_ann", "excess_total", "avg_turnover", "win_rate",
+                "bench_ann", "excess_total", "win_rate",
             ]}
             empty_metrics.update({"yearly_dd": {}, "trading_days": 0})
             return empty_metrics, np.array([]), np.array([]), oos_dates
 
         # 复用训练回测引擎，确保报告结果与训练目标完全一致
         bt = AshareBacktest()
-        _, _, daily_pnl, turnover = bt.evaluate(
+        _, _, daily_pnl = bt.evaluate(
             alpha_values, loader.raw_data_cache, loader.target_ret,
             start_idx=start, end_idx=end
         )
@@ -72,10 +72,10 @@ class StrategyReport:
             bench_daily = (valid_target.sum(dim=0) / valid_count).cpu().numpy()
 
         # 统计
-        metrics = self._compute_metrics(daily_ret, bench_daily, turnover, T, oos_dates)
+        metrics = self._compute_metrics(daily_ret, bench_daily, T, oos_dates)
         return metrics, daily_ret, bench_daily, oos_dates
 
-    def _compute_metrics(self, daily_ret, bench_daily, turnover, T, oos_dates=None):
+    def _compute_metrics(self, daily_ret, bench_daily, T, oos_dates=None):
         equity = np.cumprod(1 + daily_ret)
         bench_equity = np.cumprod(1 + bench_daily)
 
@@ -116,8 +116,6 @@ class StrategyReport:
         excess_equity = equity / np.maximum(bench_equity, 1e-12)
         excess_total = excess_equity[-1] - 1
 
-        avg_turnover = turnover.mean().item()
-
         # 胜率
         win_rate = np.mean(daily_ret > 0)
 
@@ -134,7 +132,6 @@ class StrategyReport:
             "bench_total": bench_total,
             "bench_ann": bench_ann,
             "excess_total": excess_total,
-            "avg_turnover": avg_turnover,
             "win_rate": win_rate,
             "trading_days": T,
         }
@@ -156,7 +153,6 @@ class StrategyReport:
         print(f"  Max DD Period   : {dd_start} ~ {dd_end}")
         print(f"  Calmar Ratio    : {metrics['calmar']:.2f}")
         print(f"  Win Rate        : {metrics['win_rate']:.2%}")
-        print(f"  Avg Turnover    : {metrics['avg_turnover']:.2%}")
         print("-" * 60)
         print(f"  Benchmark Ann.  : {metrics['bench_ann']:+.2%}")
         print(f"  Excess Total    : {metrics['excess_total']:+.2%}")

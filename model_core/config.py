@@ -24,7 +24,7 @@ class ModelConfig:
     # ---------- 训练参数 ----------
     BATCH_SIZE = 1024
     TRAIN_STEPS = 500
-    MAX_FORMULA_LEN = 8
+    MAX_FORMULA_LEN = 10
 
     # ---------- A股交易成本 ----------
     COMMISSION_RATE = 0.00025           # 佣金 万2.5（买卖双边）
@@ -55,8 +55,6 @@ class ModelConfig:
     SIGNAL_DIR = os.path.join(_PROJECT_ROOT, "signals")
     SIGNAL_THRESHOLD = 0.7         # sigmoid 阈值
     TOP_N_STOCKS = 20              # 截面选股数量
-    REBALANCE_FREQ = 10            # 再平衡周期（交易日）：每 N 天执行一次截面选股，非再平衡日沿用上一日持仓
-    REBALANCE_RANK_GAP = 5         # 换仓排名阈值：新候选领先最弱持仓至少N名才调仓（0=关闭）
 
     # ---------- 全市场股票池 ----------
     UNIVERSE = "all"                # "hs300" 仅沪深300 | "all" 全A股主板

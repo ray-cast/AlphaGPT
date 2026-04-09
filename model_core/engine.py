@@ -256,7 +256,7 @@ class AlphaEngine:
                     rewards[i] = -0.5
                     continue
 
-                score, ret_val, _, _ = self.bt.evaluate(
+                score, ret_val, _ = self.bt.evaluate(
                     res, self.loader.raw_data_cache, self.loader.target_ret,
                     start_idx=self.train_start, end_idx=self.train_end
                 )
