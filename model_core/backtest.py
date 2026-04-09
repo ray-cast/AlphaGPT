@@ -149,14 +149,10 @@ class AshareBacktest:
 
     @staticmethod
     def _build_position(scores, valid_mask, top_n, rank_gap, rebalance_freq=20, limit_down=None):
-        """构建持仓矩阵，引入再平衡周期和换手惩罚阈值。
+        """构建持仓矩阵（纯 torch 实现，消除 GPU↔CPU 搬运）。
 
-        每 rebalance_freq 个交易日执行一次截面选股（再平衡），
-        非再平衡日沿用上一日持仓（仅剔除停牌/退成分股）。
-        再平衡日内保留上一日持仓，只有当新候选股票的截面排名领先当前最弱持仓
-        超过 rank_gap 名时才换仓，以减少无谓换手和交易成本。
-
-        优化：使用 numpy boolean mask + 批量赋值，避免逐元素 GPU tensor 操作。
+        非再平衡日：持仓沿用 + 剔除无效 + 向量化补缺（无内层循环）。
+        再平衡日：rank_gap 贪心换仓保留顺序逻辑（仅 top_n × rebalance_days 次迭代）。
 
         Args:
             scores:        [N_stocks, T] 分数（无效股票已设 -inf）
@@ -168,8 +164,6 @@ class AshareBacktest:
         Returns:
             position:   [N_stocks, T] 持仓矩阵（0/1）
         """
-        import numpy as np
-
         N_stocks, T_len = scores.shape
 
         # ---- 阈值关闭：回退到原始 top-K 逻辑 ----
@@ -180,87 +174,64 @@ class AshareBacktest:
             position[~valid_mask] = 0.0
             return position
 
-        # ---- 预计算：一次性转 numpy，避免循环中反复 GPU→CPU ----
-        # 直接在 numpy 上做 argsort/topk，避免 GPU sync 开销
-        scores_np = scores.cpu().numpy()            # [N_stocks, T_len]
-        valid_np = valid_mask.cpu().numpy()         # [N_stocks, T_len]
-
-        # numpy 排名表（0 = 最佳排名）
-        sorted_idx_np = scores_np.argsort(axis=0)[::-1]  # descending
-        ranks_np = np.zeros_like(sorted_idx_np, dtype=np.int64)
-        rank_pos_np = np.arange(N_stocks, dtype=np.int64)[:, np.newaxis]
-        ranks_np[sorted_idx_np, np.arange(T_len)] = rank_pos_np
-
-        # 跌停掩码转 numpy
-        limit_down_np = limit_down.cpu().numpy() if limit_down is not None else None
-
-        # 直接复用已排好的排名表取前 k 名（sorted_idx_np 降序，-inf 排末尾）
+        # ---- 预计算（全 torch，不离开 GPU）----
         k = min(top_n * 2, N_stocks)
-        topk_np = sorted_idx_np[:k, :]
-        pos_np = np.zeros((N_stocks, T_len), dtype=np.float32)
+        _, topk_idx = scores.topk(k, dim=0)                    # [k, T]
+        sorted_idx = scores.argsort(dim=0, descending=True)    # [N, T]
+        ranks = torch.zeros(N_stocks, T_len, dtype=torch.long, device=scores.device)
+        rank_vals = torch.arange(N_stocks, dtype=torch.long, device=scores.device)[:, None]
+        ranks.scatter_(0, sorted_idx, rank_vals.expand_as(ranks))
 
-        # ---- 用 boolean mask 跟踪持仓 ----
-        held_mask = np.zeros(N_stocks, dtype=bool)
+        position = torch.zeros_like(scores)
+        held = torch.zeros(N_stocks, dtype=torch.bool, device=scores.device)
 
         for t in range(T_len):
-            # 移除无效持仓：一条 numpy AND 操作
-            held_mask &= valid_np[:, t]
+            # 移除无效持仓
+            held &= valid_mask[:, t]
 
             is_rebalance = (rebalance_freq <= 1) or (t == 0) or (t % rebalance_freq == 0)
+            held_count = int(held.sum())
 
-            # 补充空缺席位（停牌导致脱落时）
-            held_count = int(held_mask.sum())
+            # 补充空缺席位（向量化，无内层 Python 循环）
             if held_count < top_n:
-                candidates = topk_np[:, t]  # 当天预计算的 topk
-                missing = top_n - held_count
-                for idx in candidates:
-                    if missing <= 0:
-                        break
-                    if not held_mask[idx]:
-                        held_mask[idx] = True
-                        missing -= 1
+                cands = topk_idx[:, t]
+                fill = cands[~held[cands]][:top_n - held_count]
+                held[fill] = True
+                held_count = top_n
 
-            # 再平衡日：尝试升级持仓
-            if is_rebalance and held_mask.sum() == top_n:
-                candidates = topk_np[:, t]
-                today_ranks = ranks_np[:, t]
+            # 再平衡日：贪心换仓（最多 top_n 次 swap，顺序逻辑无法向量化）
+            if is_rebalance and held_count == top_n:
+                today_ranks = ranks[:, t]
+                cand_list = topk_idx[:, t].tolist()
 
-                held_indices = np.where(held_mask)[0]
-                # 找当前最弱持仓（排名最大 = 最差），跌停持仓不可被替换
-                held_ranks = today_ranks[held_indices]
-                if limit_down_np is not None:
-                    held_blocked = limit_down_np[:, t][held_indices]
-                    held_ranks = held_ranks.copy()
-                    held_ranks[held_blocked] = -1  # 屏蔽：确保不被 argmax 选中
-                weakest_pos = int(np.argmax(held_ranks))
-                weakest_idx = held_indices[weakest_pos]
-                weakest_rank = int(today_ranks[weakest_idx])
+                held_idx = torch.where(held)[0]
+                hr = today_ranks[held_idx].clone()
+                if limit_down is not None:
+                    hr[limit_down[held_idx, t]] = -1
+                wi = int(hr.argmax())
+                weakest = int(held_idx[wi])
+                w_rank = int(today_ranks[weakest])
 
-                for cand_idx in candidates:
-                    if held_mask[cand_idx]:
+                for ci in cand_list:
+                    if held[ci]:
                         continue
-                    cand_rank = int(today_ranks[cand_idx])
-                    if weakest_rank - cand_rank > rank_gap:
-                        # 换仓
-                        held_mask[weakest_idx] = False
-                        held_mask[cand_idx] = True
+                    if w_rank - int(today_ranks[ci]) > rank_gap:
+                        held[weakest] = False
+                        held[ci] = True
                         # 重新找最弱（跌停保护）
-                        held_indices = np.where(held_mask)[0]
-                        held_ranks = today_ranks[held_indices]
-                        if limit_down_np is not None:
-                            held_blocked = limit_down_np[:, t][held_indices]
-                            held_ranks = held_ranks.copy()
-                            held_ranks[held_blocked] = -1
-                        weakest_pos = int(np.argmax(held_ranks))
-                        weakest_idx = held_indices[weakest_pos]
-                        weakest_rank = int(today_ranks[weakest_idx])
+                        held_idx = torch.where(held)[0]
+                        hr = today_ranks[held_idx].clone()
+                        if limit_down is not None:
+                            hr[limit_down[held_idx, t]] = -1
+                        wi = int(hr.argmax())
+                        weakest = int(held_idx[wi])
+                        w_rank = int(today_ranks[weakest])
                     else:
                         break
 
-            # 批量赋值：一次 numpy 操作代替逐元素 GPU 写入
-            pos_np[held_mask, t] = 1.0
+            position[held, t] = 1.0
 
-        return torch.from_numpy(pos_np).to(device=scores.device, dtype=scores.dtype)
+        return position
 
     @staticmethod
     def _vectorized_ic_raw(factors, target_ret, valid_mask):
