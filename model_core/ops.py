@@ -119,64 +119,44 @@ def _ts_max(x: torch.Tensor, d: int) -> torch.Tensor:
 
 @torch.jit.script
 def _ts_std(x: torch.Tensor, d: int) -> torch.Tensor:
-    """时序滚动标准差。使用 cumsum 公式避免 unfold 开销。"""
+    """时序滚动标准差。使用 unfold 避免 cumsum NaN 永久传播。"""
     if d <= 1: return torch.zeros_like(x)
     B, T = x.shape
-    # cumsum 公式: Var(X) = E[X^2] - E[X]^2
-    x2 = x * x
-    pad = torch.zeros((B, d - 1), device=x.device, dtype=x.dtype)
-    cs = torch.cumsum(torch.cat([pad, x], dim=1), dim=1)
-    cs2 = torch.cumsum(torch.cat([pad, x2], dim=1), dim=1)
-    # 滚动求和
-    roll_sum = cs[:, d:] - cs[:, :-d]
-    roll_sum2 = cs2[:, d:] - cs2[:, :-d]
-    mean = roll_sum / d
-    var = roll_sum2 / d - mean * mean
-    result = torch.sqrt(var.clamp(min=1e-12))
-    # 前 d-1 个位置窗口不足 d，除数错误，显式置 NaN
-    result[:, :d - 1] = float('nan')
-    return result
+    pad = torch.full((B, d - 1), float('nan'), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    windows = x_pad.unfold(1, d, 1)
+    mean = windows.mean(dim=-1, keepdim=True)
+    var = ((windows - mean) ** 2).sum(dim=-1) / d
+    return torch.sqrt(var.clamp(min=1e-12))
 
 
 @torch.jit.script
 def _ts_mean(x: torch.Tensor, d: int) -> torch.Tensor:
-    """时序滚动均值。使用 cumsum 公式避免 unfold 开销。"""
+    """时序滚动均值。"""
     if d <= 1: return x
     B, T = x.shape
-    pad = torch.zeros((B, d - 1), device=x.device, dtype=x.dtype)
-    cs = torch.cumsum(torch.cat([pad, x], dim=1), dim=1)
-    roll_sum = cs[:, d:] - cs[:, :-d]
-    result = roll_sum / d
-    result[:, :d - 1] = float('nan')
-    return result
+    pad = torch.full((B, d - 1), float('nan'), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    windows = x_pad.unfold(1, d, 1)
+    return windows.mean(dim=-1)
 
 
 @torch.jit.script
 def _ts_corr(x: torch.Tensor, y: torch.Tensor, d: int) -> torch.Tensor:
-    """两因子滚动 Pearson 相关系数。使用 cumsum 公式避免 unfold。"""
+    """两因子滚动 Pearson 相关系数。使用 unfold 避免 cumsum NaN 传播。"""
     if d <= 1: return torch.zeros_like(x)
     B, T = x.shape
-    pad = torch.zeros((B, d - 1), device=x.device, dtype=x.dtype)
-    xy = x * y
-    x2 = x * x
-    y2 = y * y
-    cs_x = torch.cumsum(torch.cat([pad, x], dim=1), dim=1)
-    cs_y = torch.cumsum(torch.cat([pad, y], dim=1), dim=1)
-    cs_xy = torch.cumsum(torch.cat([pad, xy], dim=1), dim=1)
-    cs_x2 = torch.cumsum(torch.cat([pad, x2], dim=1), dim=1)
-    cs_y2 = torch.cumsum(torch.cat([pad, y2], dim=1), dim=1)
-    # 滚动求和
-    sx = cs_x[:, d:] - cs_x[:, :-d]
-    sy = cs_y[:, d:] - cs_y[:, :-d]
-    sxy = cs_xy[:, d:] - cs_xy[:, :-d]
-    sx2 = cs_x2[:, d:] - cs_x2[:, :-d]
-    sy2 = cs_y2[:, d:] - cs_y2[:, :-d]
-    # Pearson: cov / (std_x * std_y)
-    cov = sxy / d - (sx / d) * (sy / d)
-    var_x = (sx2 / d - (sx / d) ** 2).clamp(min=1e-12)
-    var_y = (sy2 / d - (sy / d) ** 2).clamp(min=1e-12)
-    result = cov / (torch.sqrt(var_x) * torch.sqrt(var_y) + 1e-8)
-    result[:, :d - 1] = float('nan')
+    pad = torch.full((B, d - 1), float('nan'), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    y_pad = torch.cat([pad, y], dim=1)
+    wx = x_pad.unfold(1, d, 1)
+    wy = y_pad.unfold(1, d, 1)
+    mx = wx.mean(dim=-1, keepdim=True)
+    my = wy.mean(dim=-1, keepdim=True)
+    cov = ((wx - mx) * (wy - my)).sum(dim=-1) / d
+    var_x = ((wx - mx) ** 2).sum(dim=-1) / d
+    var_y = ((wy - my) ** 2).sum(dim=-1) / d
+    result = cov / (torch.sqrt(var_x.clamp(min=1e-12)) * torch.sqrt(var_y.clamp(min=1e-12)) + 1e-8)
     return result
 
 
@@ -207,14 +187,13 @@ def _ts_argmax(x: torch.Tensor, d: int) -> torch.Tensor:
 
 @torch.jit.script
 def _ts_sum(x: torch.Tensor, d: int) -> torch.Tensor:
-    """时序滚动求和。使用 cumsum 公式避免 unfold 开销。"""
+    """时序滚动求和。"""
     if d <= 1: return x
     B, T = x.shape
-    pad = torch.zeros((B, d - 1), device=x.device, dtype=x.dtype)
-    cs = torch.cumsum(torch.cat([pad, x], dim=1), dim=1)
-    result = cs[:, d:] - cs[:, :-d]
-    result[:, :d - 1] = float('nan')
-    return result
+    pad = torch.full((B, d - 1), float('nan'), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    windows = x_pad.unfold(1, d, 1)
+    return windows.sum(dim=-1)
 
 
 # ---- 截面算子 ----
@@ -235,7 +214,7 @@ def _cs_zscore(x: torch.Tensor) -> torch.Tensor:
     var = (x_safe * x_safe).sum(dim=0, keepdim=True) / n - mean * mean
     std = var.sqrt().clamp(min=1e-6)
     result = (x_safe - mean) / std
-    return torch.where(valid, result, torch.zeros_like(result))
+    return torch.where(valid, result, torch.full_like(result, float('nan')))
 
 
 # ---- 算子注册表 ----
