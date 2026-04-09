@@ -27,8 +27,10 @@ class ModelConfig:
     MAX_FORMULA_LEN = 8
 
     # ---------- A股交易成本 ----------
-    TOTAL_BUY_COST = 0.00025 + 0.001     # 买入成本（佣金万2.5 + 滑点千1）
-    TOTAL_SELL_COST = 0.00025 + 0.0005 + 0.001  # 卖出成本（佣金+印花税千0.5+滑点千1）
+    COMMISSION_RATE = 0.00025           # 佣金 万2.5（买卖双边）
+    SLIPPAGE_RATE = 0.001               # 滑点 千1（买卖双边）
+    TOTAL_BUY_COST = COMMISSION_RATE + SLIPPAGE_RATE
+    TOTAL_SELL_COST = COMMISSION_RATE + SLIPPAGE_RATE  # 未含印花税，需按日期取
     STAMP_TAX_RATE_OLD = 0.001           # 印花税率（2023-08-28 前，卖出单边千1）
     STAMP_TAX_RATE_NEW = 0.0005          # 印花税率（2023-08-28 起，卖出单边千0.5）
     STAMP_TAX_CHANGE_DATE = "20230828"   # 印花税减半生效日

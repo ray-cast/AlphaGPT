@@ -142,8 +142,8 @@ class AshareBacktest:
             raw_ic = self._vectorized_ic_raw(factors, target_ret, valid_mask)
             ic_norm = torch.clamp(raw_ic * 5.0, -1.0, 1.0)
 
-        # 加权合成：sortino 3x + IC 1.5x - 各惩罚项
-        fitness = 3.0 * sortino_norm + 1.5 * ic_norm - dd_penalty - activity_penalty
+        # 加权合成：sortino 3x + IC 2.5x - 各惩罚项
+        fitness = 3.0 * sortino_norm + 2.5 * ic_norm - dd_penalty - activity_penalty
         fitness = torch.clamp(fitness, -5.0, 5.0)
         return fitness, cum_ret.item()
 

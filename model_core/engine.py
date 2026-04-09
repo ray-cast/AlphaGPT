@@ -291,10 +291,8 @@ class AlphaEngine:
             adv = adv - old_values.detach()
             adv = adv - adv.mean()
 
-            # Entropy 系数余弦退火
-            entropy_coef = ModelConfig.ENTROPY_COEF_END + 0.5 * (
-                ModelConfig.ENTROPY_COEF_START - ModelConfig.ENTROPY_COEF_END
-            ) * (1.0 + math.cos(math.pi * progress))
+            # Entropy 系数线性退火（比余弦退火探索期更长）
+            entropy_coef = ModelConfig.ENTROPY_COEF_START * (1 - progress) + ModelConfig.ENTROPY_COEF_END * progress
 
             # ---- Phase 4: PPO Update ----
             total_loss_val = 0.0
