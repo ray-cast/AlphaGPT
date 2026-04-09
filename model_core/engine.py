@@ -126,6 +126,16 @@ class AlphaEngine:
         mask[:, self.model.bos_id] = float('-inf')
         return mask
 
+    def _step_open_slots(self, open_slots, action):
+        """根据 action token 更新 open_slots 计数器（in-place）。"""
+        feat_count = len(self.model.features_list)
+        is_op = action >= feat_count
+        op_delta = self.arity_tens[action] - 1
+        feat_delta = torch.full_like(action, -1)
+        delta = torch.where(is_op, op_delta, feat_delta)
+        delta[open_slots == 0] = 0
+        open_slots += delta
+
     @staticmethod
     def _valid_prefix_len(tokens, feat_count, arity_map):
         """计算合法前缀表达式的实际长度（去除填充部分）。"""
@@ -145,14 +155,13 @@ class AlphaEngine:
     def _evaluate_sequences(self, seqs, max_len):
         """Teacher-forcing: 用当前模型重新评估序列的 log_probs, values, entropy。"""
         B, T = seqs.shape
-        feat_count = len(self.model.features_list)
         open_slots = torch.ones(B, dtype=torch.long, device=ModelConfig.DEVICE)
-        curr_inp = torch.full((B, 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
+        inp_buf = torch.full((B, T + 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
 
         log_probs, values, entropies = [], [], []
 
         for t in range(T):
-            logits, val, _ = self.model(curr_inp)
+            logits, val, _ = self.model(inp_buf[:, :t + 1])
             mask = self._get_strict_mask(open_slots, t, max_len)
             dist = Categorical(logits=(logits + mask))
             action = seqs[:, t]
@@ -161,14 +170,8 @@ class AlphaEngine:
             values.append(val)
             entropies.append(dist.entropy())
 
-            curr_inp = torch.cat([curr_inp, action.unsqueeze(1)], dim=1)
-
-            is_op = action >= feat_count
-            op_delta = self.arity_tens[action] - 1
-            feat_delta = torch.full_like(action, -1)
-            delta = torch.where(is_op, op_delta, feat_delta)
-            delta[open_slots == 0] = 0
-            open_slots += delta
+            inp_buf[:, t + 1] = action
+            self._step_open_slots(open_slots, action)
 
         return (
             torch.stack(log_probs, 1).sum(1),           # [B] total_log_prob
@@ -202,11 +205,11 @@ class AlphaEngine:
             # --- Phase 1: Rollout (no grad) ---
             eps = ModelConfig.EPS_GREEDY_START * (1 - progress) + ModelConfig.EPS_GREEDY_END * progress
             with torch.no_grad():
-                inp = torch.full((bs, 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
                 open_slots = torch.ones(bs, dtype=torch.long, device=ModelConfig.DEVICE)
+                inp_buf = torch.full((bs, current_max_len + 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
                 tokens_list = []
                 for t in range(current_max_len):
-                    logits, _, _ = self.model(inp)
+                    logits, _, _ = self.model(inp_buf[:, :t + 1])
                     mask = self._get_strict_mask(open_slots, t, current_max_len)
                     dist = Categorical(logits=(logits + mask))
                     # epsilon-greedy: 以 eps 概率在有效动作空间均匀采样
@@ -214,14 +217,8 @@ class AlphaEngine:
                     use_random = torch.rand(bs, device=ModelConfig.DEVICE) < eps
                     action = torch.where(use_random, uniform.sample(), dist.sample())
                     tokens_list.append(action)
-                    inp = torch.cat([inp, action.unsqueeze(1)], dim=1)
-
-                    is_op = action >= feat_count
-                    op_delta = self.arity_tens[action] - 1
-                    feat_delta = torch.full_like(action, -1)
-                    delta = torch.where(is_op, op_delta, feat_delta)
-                    delta[open_slots == 0] = 0
-                    open_slots += delta
+                    inp_buf[:, t + 1] = action
+                    self._step_open_slots(open_slots, action)
 
             seqs = torch.stack(tokens_list, dim=1)
 
