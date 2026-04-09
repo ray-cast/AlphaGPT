@@ -11,8 +11,8 @@ class AshareBacktest:
     """
 
     def __init__(self):
-        self.commission = 0.00025
-        self.slippage = 0.001
+        self.commission = ModelConfig.COMMISSION_RATE
+        self.slippage = ModelConfig.SLIPPAGE_RATE
         self.buy_cost = self.commission + self.slippage   # 买入：佣金 + 滑点
         self.min_turnover = ModelConfig.MIN_TURNOVER_RATE
         self.top_n = ModelConfig.TOP_N_STOCKS
@@ -78,7 +78,7 @@ class AshareBacktest:
 
         # 评分
         fitness, cum_ret = self._compute_score(
-            daily_pnl, factors, target_ret, valid_mask, position, N_stocks, turnover,
+            daily_pnl, factors, target_ret, valid_mask, position, N_stocks,
         )
         return fitness, cum_ret, daily_pnl, turnover
 
@@ -104,11 +104,8 @@ class AshareBacktest:
         net_pnl = gross_pnl - tx_cost
         return net_pnl.sum(dim=0) / self.top_n
 
-    def _compute_score(self, daily_pnl, factors, target_ret, valid_mask, position, N_stocks, turnover):
-        """计算综合适应度：归一化加权 Sortino + IC - 回撤/活跃度/换手惩罚。
-
-        Args:
-            turnover: 已在外部计算好的换手率矩阵，避免重复计算。
+    def _compute_score(self, daily_pnl, factors, target_ret, valid_mask, position, N_stocks):
+        """计算综合适应度：归一化加权 Sortino + IC - 回撤/活跃度惩罚。
 
         Returns:
             (fitness: tensor, cum_ret: float)
@@ -129,13 +126,13 @@ class AshareBacktest:
         sortino = mean_ret / down_std * (252 ** 0.5)
         sortino_norm = torch.clamp(sortino, -3.0, 5.0) / 5.0  # [-0.6, 1.0]
 
-        # 回撤惩罚（2% 起罚，梯度友好）
+        # 回撤惩罚（5% 起罚，梯度友好）
         cum_curve = torch.cumsum(daily_pnl, dim=0)
         running_max = torch.cummax(cum_curve, dim=0)[0]
         drawdown = cum_curve - running_max
         max_dd = drawdown.min()
         dd_penalty = torch.min(
-            torch.relu(-max_dd - 0.02) * 3.0,
+            torch.relu(-max_dd - 0.05) * 3.0,
             torch.tensor(2.0, device=daily_pnl.device)
         )
 
@@ -145,15 +142,8 @@ class AshareBacktest:
             raw_ic = self._vectorized_ic_raw(factors, target_ret, valid_mask)
             ic_norm = torch.clamp(raw_ic * 5.0, -1.0, 1.0)
 
-        # 换手率惩罚（日均换手超 30% 起罚，封顶 1.0）
-        avg_turnover = turnover.sum() / (active_days + 1e-6) / self.top_n
-        turnover_penalty = torch.min(
-            torch.relu(avg_turnover - 0.3) * 1.0,
-            torch.tensor(1.0, device=daily_pnl.device)
-        )
-
         # 加权合成：sortino 3x + IC 1.5x - 各惩罚项
-        fitness = 3.0 * sortino_norm + 1.5 * ic_norm - dd_penalty - activity_penalty - turnover_penalty
+        fitness = 3.0 * sortino_norm + 1.5 * ic_norm - dd_penalty - activity_penalty
         fitness = torch.clamp(fitness, -5.0, 5.0)
         return fitness, cum_ret.item()
 
