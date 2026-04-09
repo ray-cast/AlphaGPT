@@ -200,8 +200,11 @@ def _ts_sum(x: torch.Tensor, d: int) -> torch.Tensor:
 
 @torch.jit.script
 def _cs_rank(x: torch.Tensor) -> torch.Tensor:
-    """截面排名：将每只股票在当日所有股票中的排名归一化到 [0, 1]。"""
-    return x.argsort(dim=0).argsort(0).float() / (x.shape[0] + 1e-6)
+    """截面排名：将每只股票在当日所有股票中的排名归一化到 [0, 1]。NaN 位置还原为 NaN。"""
+    valid = ~torch.isnan(x)
+    x_safe = torch.where(valid, x, torch.full_like(x, float('inf')))
+    rank = x_safe.argsort(dim=0).argsort(0).float() / (x.shape[0] + 1e-6)
+    return torch.where(valid, rank, torch.full_like(rank, float('nan')))
 
 
 @torch.jit.script
