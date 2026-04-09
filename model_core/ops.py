@@ -18,12 +18,6 @@ def _signedpower(x: torch.Tensor) -> torch.Tensor:
 
 
 @torch.jit.script
-def _op_gate(condition: torch.Tensor, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    mask = (condition > 0).float()
-    return mask * x + (1.0 - mask) * y
-
-
-@torch.jit.script
 def _op_jump(x: torch.Tensor) -> torch.Tensor:
     # expanding window z-score，避免未来数据泄漏
     # 使用 nan-safe 累积和，防止 NaN 永久传播
@@ -196,72 +190,235 @@ def _ts_sum(x: torch.Tensor, d: int) -> torch.Tensor:
     return windows.sum(dim=-1)
 
 
-# ---- 截面算子 ----
-
 @torch.jit.script
-def _cs_rank(x: torch.Tensor) -> torch.Tensor:
-    """截面排名：将每只股票在当日所有股票中的排名归一化到 [0, 1]。NaN 位置还原为 NaN。"""
-    valid = ~torch.isnan(x)
-    x_safe = torch.where(valid, x, torch.full_like(x, float('inf')))
-    rank = x_safe.argsort(dim=0).argsort(0).float() / (x.shape[0] + 1e-6)
-    return torch.where(valid, rank, torch.full_like(rank, float('nan')))
+def _ts_ref(x: torch.Tensor, d: int) -> torch.Tensor:
+    """引用 d 期前的值。"""
+    return _ts_delay(x, d)
 
 
 @torch.jit.script
-def _cs_zscore(x: torch.Tensor) -> torch.Tensor:
-    """截面 z-score 标准化：保留幅度信息，不同于 rank 只保留排序。"""
-    valid = ~torch.isnan(x)
-    x_safe = torch.where(valid, x, torch.zeros_like(x))
-    n = valid.float().sum(dim=0, keepdim=True).clamp(min=1.0)
-    mean = x_safe.sum(dim=0, keepdim=True) / n
-    var = (x_safe * x_safe).sum(dim=0, keepdim=True) / n - mean * mean
-    std = var.sqrt().clamp(min=1e-6)
-    result = (x_safe - mean) / std
-    return torch.where(valid, result, torch.full_like(result, float('nan')))
+def _ts_var(x: torch.Tensor, d: int) -> torch.Tensor:
+    """时序滚动方差。"""
+    if d <= 1:
+        return torch.zeros_like(x)
+    B, T = x.shape
+    pad = torch.full((B, d - 1), float('nan'), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    windows = x_pad.unfold(1, d, 1)
+    mean = windows.mean(dim=-1, keepdim=True)
+    return ((windows - mean) ** 2).sum(dim=-1) / d
+
+
+@torch.jit.script
+def _ts_skew(x: torch.Tensor, d: int) -> torch.Tensor:
+    """时序滚动偏度。"""
+    if d <= 2:
+        return torch.zeros_like(x)
+    B, T = x.shape
+    pad = torch.full((B, d - 1), float('nan'), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    windows = x_pad.unfold(1, d, 1)
+    mean = windows.mean(dim=-1, keepdim=True)
+    diff = windows - mean
+    m2 = (diff ** 2).sum(dim=-1) / d
+    m3 = (diff ** 3).sum(dim=-1) / d
+    return m3 / torch.pow(m2.clamp(min=1e-12), 1.5)
+
+
+@torch.jit.script
+def _ts_kurt(x: torch.Tensor, d: int) -> torch.Tensor:
+    """时序滚动超额峰度。"""
+    if d <= 3:
+        return torch.zeros_like(x)
+    B, T = x.shape
+    pad = torch.full((B, d - 1), float('nan'), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    windows = x_pad.unfold(1, d, 1)
+    mean = windows.mean(dim=-1, keepdim=True)
+    diff = windows - mean
+    m2 = (diff ** 2).sum(dim=-1) / d
+    m4 = (diff ** 4).sum(dim=-1) / d
+    return m4 / m2.clamp(min=1e-12).pow(2) - 3.0
+
+
+@torch.jit.script
+def _ts_med(x: torch.Tensor, d: int) -> torch.Tensor:
+    """时序滚动中位数。"""
+    if d <= 1:
+        return x
+    B, T = x.shape
+    pad = torch.full((B, d - 1), float('nan'), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    windows = x_pad.unfold(1, d, 1)
+    return windows.sort(dim=-1)[0][:, :, d // 2]
+
+
+@torch.jit.script
+def _ts_mad(x: torch.Tensor, d: int) -> torch.Tensor:
+    """时序滚动平均绝对偏差 MAD = mean(|x - mean(x)|)。"""
+    if d <= 1:
+        return torch.zeros_like(x)
+    B, T = x.shape
+    pad = torch.full((B, d - 1), float('nan'), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    windows = x_pad.unfold(1, d, 1)
+    mean = windows.mean(dim=-1, keepdim=True)
+    return (windows - mean).abs().mean(dim=-1)
+
+
+@torch.jit.script
+def _ts_wma(x: torch.Tensor, d: int) -> torch.Tensor:
+    """加权移动平均：线性递增权重 [1, 2, ..., d]。"""
+    if d <= 1:
+        return x
+    B, T = x.shape
+    pad = torch.full((B, d - 1), float('nan'), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    windows = x_pad.unfold(1, d, 1)
+    w = torch.arange(1, d + 1, device=x.device, dtype=x.dtype)
+    w = w / w.sum()
+    return (windows * w).sum(dim=-1)
+
+
+@torch.jit.script
+def _ts_ema(x: torch.Tensor, d: int) -> torch.Tensor:
+    """指数移动平均：alpha=2/(d+1)，几何衰减权重近似。"""
+    if d <= 1:
+        return x
+    B, T = x.shape
+    alpha = 2.0 / (d + 1.0)
+    pad = torch.full((B, d - 1), float('nan'), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    windows = x_pad.unfold(1, d, 1)
+    powers = torch.arange(d - 1, -1, -1, device=x.device, dtype=x.dtype)
+    w = alpha * torch.pow(1.0 - alpha, powers)
+    w = w / w.sum()
+    return (windows * w).sum(dim=-1)
+
+
+@torch.jit.script
+def _ts_cov(x: torch.Tensor, y: torch.Tensor, d: int) -> torch.Tensor:
+    """两因子滚动协方差。"""
+    if d <= 1:
+        return torch.zeros_like(x)
+    B, T = x.shape
+    pad = torch.full((B, d - 1), float('nan'), device=x.device)
+    x_pad = torch.cat([pad, x], dim=1)
+    y_pad = torch.cat([pad, y], dim=1)
+    wx = x_pad.unfold(1, d, 1)
+    wy = y_pad.unfold(1, d, 1)
+    mx = wx.mean(dim=-1, keepdim=True)
+    my = wy.mean(dim=-1, keepdim=True)
+    return ((wx - mx) * (wy - my)).sum(dim=-1) / d
 
 
 # ---- 算子注册表 ----
 
 OPS_CONFIG = [
-    # ---- 算术算子 ----
+    # ---- 一元算子 ----
+    ('ABS', torch.abs, 1),
+    ('SIGN', torch.sign, 1),
+    ('LOG', lambda x: torch.log(x.abs() + 1e-8), 1),
+    ('NEG', lambda x: -x, 1),
+    ('SIGNEDPOWER', _signedpower, 1),
+    # ---- 二元算子 ----
     ('ADD', lambda x, y: x + y, 2),
     ('SUB', lambda x, y: x - y, 2),
     ('MUL', lambda x, y: x * y, 2),
     ('DIV', lambda x, y: x / (y + 1e-6), 2),
-    ('NEG', lambda x: -x, 1),
-    ('ABS', torch.abs, 1),
-    ('SIGN', torch.sign, 1),
-    ('SIGNEDPOWER', _signedpower, 1),          # WQ101 核心非线性放大
-    # ---- 控制流 ----
-    ('GATE', _op_gate, 3),
-    # ---- 截面算子 ----
-    ('CS_RANK', _cs_rank, 1),
-    ('CS_ZSCORE', _cs_zscore, 1),              # 截面z-score保留幅度
-    ('CROSS', lambda x, y: _cs_rank(x) * _cs_rank(y), 2),
+    ('POW', lambda x, y: torch.pow(x.abs() + 1e-8, y), 2),
+    ('GREATER', lambda x, y: (x > y).float(), 2),
+    ('LESS', lambda x, y: (x < y).float(), 2),
+    # ---- 常量（arity=0，返回标量，运算时自动广播） ----
+    ('CONST_-30', lambda: -30.0, 0),
+    ('CONST_-20', lambda: -20.0, 0),
+    ('CONST_-10', lambda: -10.0, 0),
+    ('CONST_-5', lambda: -5.0, 0),
+    ('CONST_-2', lambda: -2.0, 0),
+    ('CONST_-1', lambda: -1.0, 0),
+    ('CONST_-0.5', lambda: -0.5, 0),
+    ('CONST_0.5', lambda: 0.5, 0),
+    ('CONST_1', lambda: 1.0, 0),
+    ('CONST_2', lambda: 2.0, 0),
+    ('CONST_5', lambda: 5.0, 0),
+    ('CONST_10', lambda: 10.0, 0),
+    ('CONST_20', lambda: 20.0, 0),
+    ('CONST_30', lambda: 30.0, 0),
+    # ---- 时序算子（5日窗口） ----
+    ('TS_REF5', lambda x: _ts_ref(x, 5), 1),
+    ('TS_MEAN5', lambda x: _ts_mean(x, 5), 1),
+    ('TS_SUM5', lambda x: _ts_sum(x, 5), 1),
+    ('TS_STD5', lambda x: _ts_std(x, 5), 1),
+    ('TS_VAR5', lambda x: _ts_var(x, 5), 1),
+    ('TS_SKEW5', lambda x: _ts_skew(x, 5), 1),
+    ('TS_KURT5', lambda x: _ts_kurt(x, 5), 1),
+    ('TS_MAX5', lambda x: _ts_max(x, 5), 1),
+    ('TS_MIN5', lambda x: _ts_min(x, 5), 1),
+    ('TS_MED5', lambda x: _ts_med(x, 5), 1),
+    ('TS_MAD5', lambda x: _ts_mad(x, 5), 1),
+    ('TS_RANK5', lambda x: _ts_rank(x, 5), 1),
+    ('TS_DELTA5', lambda x: _ts_delta(x, 5), 1),
+    ('TS_WMA5', lambda x: _ts_wma(x, 5), 1),
+    ('TS_EMA5', lambda x: _ts_ema(x, 5), 1),
+    ('TS_DELAY5', lambda x: _ts_delay(x, 5), 1),
+    ('TS_ARGMIN5', lambda x: _ts_argmin(x, 5), 1),
+    ('TS_ARGMAX5', lambda x: _ts_argmax(x, 5), 1),
+    ('TS_COV5', lambda x, y: _ts_cov(x, y, 5), 2),
+    ('TS_CORR5', lambda x, y: _ts_corr(x, y, 5), 2),
+    # ---- 时序算子（10日窗口） ----
+    ('TS_REF10', lambda x: _ts_ref(x, 10), 1),
+    ('TS_MEAN10', lambda x: _ts_mean(x, 10), 1),
+    ('TS_SUM10', lambda x: _ts_sum(x, 10), 1),
+    ('TS_STD10', lambda x: _ts_std(x, 10), 1),
+    ('TS_VAR10', lambda x: _ts_var(x, 10), 1),
+    ('TS_SKEW10', lambda x: _ts_skew(x, 10), 1),
+    ('TS_KURT10', lambda x: _ts_kurt(x, 10), 1),
+    ('TS_MAX10', lambda x: _ts_max(x, 10), 1),
+    ('TS_MIN10', lambda x: _ts_min(x, 10), 1),
+    ('TS_MED10', lambda x: _ts_med(x, 10), 1),
+    ('TS_MAD10', lambda x: _ts_mad(x, 10), 1),
+    ('TS_RANK10', lambda x: _ts_rank(x, 10), 1),
+    ('TS_DELTA10', lambda x: _ts_delta(x, 10), 1),
+    ('TS_DECAY10', lambda x: _ts_decay_linear(x, 10), 1),
+    ('TS_WMA10', lambda x: _ts_wma(x, 10), 1),
+    ('TS_EMA10', lambda x: _ts_ema(x, 10), 1),
+    ('TS_COV10', lambda x, y: _ts_cov(x, y, 10), 2),
+    ('TS_CORR10', lambda x, y: _ts_corr(x, y, 10), 2),
     # ---- 时序算子（20日窗口） ----
+    ('TS_REF20', lambda x: _ts_ref(x, 20), 1),
+    ('TS_MEAN20', lambda x: _ts_mean(x, 20), 1),
+    ('TS_SUM20', lambda x: _ts_sum(x, 20), 1),
+    ('TS_STD20', lambda x: _ts_std(x, 20), 1),
+    ('TS_VAR20', lambda x: _ts_var(x, 20), 1),
+    ('TS_SKEW20', lambda x: _ts_skew(x, 20), 1),
+    ('TS_KURT20', lambda x: _ts_kurt(x, 20), 1),
+    ('TS_MAX20', lambda x: _ts_max(x, 20), 1),
+    ('TS_MIN20', lambda x: _ts_min(x, 20), 1),
+    ('TS_MED20', lambda x: _ts_med(x, 20), 1),
+    ('TS_MAD20', lambda x: _ts_mad(x, 20), 1),
     ('TS_RANK20', lambda x: _ts_rank(x, 20), 1),
     ('TS_DECAY20', lambda x: _ts_decay_linear(x, 20), 1),
-    ('TS_STD20', lambda x: _ts_std(x, 20), 1),
+    ('TS_WMA20', lambda x: _ts_wma(x, 20), 1),
+    ('TS_EMA20', lambda x: _ts_ema(x, 20), 1),
+    ('TS_COV20', lambda x, y: _ts_cov(x, y, 20), 2),
     ('TS_CORR20', lambda x, y: _ts_corr(x, y, 20), 2),
-    ('TS_MEAN20', lambda x: _ts_mean(x, 20), 1),
-    # ---- 时序算子（10日窗口） ----
-    ('TS_RANK10', lambda x: _ts_rank(x, 10), 1),
-    ('TS_DECAY10', lambda x: _ts_decay_linear(x, 10), 1),
-    ('TS_DELTA10', lambda x: _ts_delta(x, 10), 1),
-    # ---- 时序算子（5日窗口） ----
-    ('TS_DELTA5', lambda x: _ts_delta(x, 5), 1),
-    ('TS_MIN5', lambda x: _ts_min(x, 5), 1),
-    ('TS_MAX5', lambda x: _ts_max(x, 5), 1),
-    ('TS_SUM5', lambda x: _ts_sum(x, 5), 1),  # 滚动求和
-    ('TS_ARGMIN5', lambda x: _ts_argmin(x, 5), 1),   # 极值位置
-    ('TS_ARGMAX5', lambda x: _ts_argmax(x, 5), 1),
-    ('TS_DELAY5', lambda x: _ts_delay(x, 5), 1),
-    ('TS_MEAN5', lambda x: _ts_mean(x, 5), 1),
-    # ---- 时序算子（60日窗口：中长期趋势） ----
-    ('TS_RANK60', lambda x: _ts_rank(x, 60), 1),
-    ('TS_DECAY60', lambda x: _ts_decay_linear(x, 60), 1),
-    ('TS_STD60', lambda x: _ts_std(x, 60), 1),
-    ('TS_CORR60', lambda x, y: _ts_corr(x, y, 60), 2),
-    ('TS_MEAN60', lambda x: _ts_mean(x, 60), 1),
-    ('TS_DELTA60', lambda x: _ts_delta(x, 60), 1),
+    # ---- 时序算子（40日窗口：中长期趋势） ----
+    ('TS_REF40', lambda x: _ts_ref(x, 40), 1),
+    ('TS_MEAN40', lambda x: _ts_mean(x, 40), 1),
+    ('TS_SUM40', lambda x: _ts_sum(x, 40), 1),
+    ('TS_STD40', lambda x: _ts_std(x, 40), 1),
+    ('TS_VAR40', lambda x: _ts_var(x, 40), 1),
+    ('TS_SKEW40', lambda x: _ts_skew(x, 40), 1),
+    ('TS_KURT40', lambda x: _ts_kurt(x, 40), 1),
+    ('TS_MAX40', lambda x: _ts_max(x, 40), 1),
+    ('TS_MIN40', lambda x: _ts_min(x, 40), 1),
+    ('TS_MED40', lambda x: _ts_med(x, 40), 1),
+    ('TS_MAD40', lambda x: _ts_mad(x, 40), 1),
+    ('TS_RANK40', lambda x: _ts_rank(x, 40), 1),
+    ('TS_DECAY40', lambda x: _ts_decay_linear(x, 40), 1),
+    ('TS_DELTA40', lambda x: _ts_delta(x, 40), 1),
+    ('TS_WMA40', lambda x: _ts_wma(x, 40), 1),
+    ('TS_EMA40', lambda x: _ts_ema(x, 40), 1),
+    ('TS_COV40', lambda x, y: _ts_cov(x, y, 40), 2),
+    ('TS_CORR40', lambda x, y: _ts_corr(x, y, 40), 2),
 ]

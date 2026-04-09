@@ -77,8 +77,7 @@ class ModelConfig:
 
     # ---------- SFT 热启动 ----------
     SEED_FORMULA_NAMES = [         # 种子公式（名称格式，token ID 动态计算）
-        ("CS_RANK", ["P_VALUE"]),                   # 价值因子截面排名
-        ("CS_RANK", ["RET"]),                       # 动量截面排名
-        ("CROSS", ["P_VALUE", "RET"]),              # 价值×动量交互
+        ("TS_RANK20", ["P_VALUE"]),                 # 价值因子时序排名
+        ("TS_MEAN20", ["RET"]),                     # 动量均值
     ]
     SFT_STEPS = 0                  # SFT 预训练步数（0 = 关闭热启动）
