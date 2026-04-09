@@ -36,7 +36,7 @@ def build_ipo_mask(
     trade_dates: list[str],
     min_days: int = None,
 ) -> torch.Tensor:
-    """构建次新股过滤掩码 [N, T]。
+    """构建次新股过滤掩码 [N, T]（向量化版本）。
 
     True = 已上市足够久（可交易），False = 次新股（排除）。
     """
@@ -46,31 +46,27 @@ def build_ipo_mask(
     N = len(stock_codes)
     T = len(trade_dates)
 
-    td_parsed = []
-    for d in trade_dates:
-        try:
-            td_parsed.append(datetime.strptime(str(d), "%Y%m%d"))
-        except ValueError:
-            td_parsed.append(None)
+    # 向量化日期解析：将 YYYYMMDD 整数 → 天数 ordinal
+    def _to_ordinals(dates, default=-1):
+        out = []
+        for d in dates:
+            try:
+                out.append(datetime.strptime(str(d), "%Y%m%d").toordinal())
+            except ValueError:
+                out.append(default)
+        return out
 
-    ipo_parsed = []
-    for d in list_dates:
-        try:
-            ipo_parsed.append(datetime.strptime(str(d), "%Y%m%d"))
-        except ValueError:
-            ipo_parsed.append(None)
+    td_ord = torch.tensor(_to_ordinals(trade_dates, -1), dtype=torch.int64)           # [T]
+    ipo_ord = torch.tensor(_to_ordinals(list_dates, -1), dtype=torch.int64)            # [N]
+    no_ipo = ipo_ord < 0                                                                # [N] 无上市日期
 
-    mask = torch.zeros(N, T, dtype=torch.bool, device=ModelConfig.DEVICE)
-    for i in range(N):
-        if ipo_parsed[i] is None:
-            mask[i, :] = True
-            continue
-        threshold = ipo_parsed[i] + timedelta(days=min_days)
-        for t in range(T):
-            if td_parsed[t] is not None and td_parsed[t] >= threshold:
-                mask[i, t] = True
+    # 广播比较: threshold[N,1] >= td_ord[1,T] → mask[N,T]
+    threshold = ipo_ord + min_days                                                      # [N]
+    valid_td = td_ord >= 0                                                              # [T]
+    mask = (threshold.unsqueeze(1) <= td_ord.unsqueeze(0)) & valid_td.unsqueeze(0)     # [N,T]
+    mask[no_ipo] = True  # 无上市日期的股票视为已上市
 
-    return mask
+    return mask.to(device=ModelConfig.DEVICE)
 
 
 def _limit_pct_for_code(code: str) -> float:
@@ -270,34 +266,55 @@ class AshareDataLoader:
         # 4. 不筛选公共日期：每只股票保留各自完整时间序列
         master = master.dropna(subset=["close"])
 
-        # 5. Pivot 为 [stocks, T] 的 tensor
-        close_pivot = master.pivot(index="trade_date", columns="ts_code", values="close")
-        close_pivot = close_pivot.sort_index()
-        close_pivot = close_pivot[[c for c in loaded_codes if c in close_pivot.columns]]
+        # 5. 单次 pivot 提取全部列（避免重复 pivot/sort_index/列选择）
+        code_order = [c for c in loaded_codes]
+
+        # 收集所有需要 pivot 的列
+        ohlcv_cols = ["open", "high", "low", "close", "vol", "amount"]
+        optional_cols = ["turnover_rate", "pe_ttm", "pb", "total_mv", "pre_close", "pct_chg"]
+        all_pivot_cols = [c for c in ohlcv_cols + optional_cols if c in master.columns]
+
+        # 一次性 set_index + unstack 代替多次 pivot
+        indexed = master.set_index(["trade_date", "ts_code"])[all_pivot_cols]
+        pivoted = indexed.unstack("ts_code")  # MultiIndex columns: (col_name, ts_code)
+        pivoted = pivoted.sort_index()         # 按日期排序
+        # 统一列顺序
+        pivoted = pivoted.reorder_levels([1, 0], axis=1)
+        pivoted = pivoted[code_order] if all(c in pivoted.columns.get_level_values(0) for c in code_order) else pivoted
+
+        dev = ModelConfig.DEVICE
+
+        def _col_to_tensor(col_name, ffill=True):
+            """从预计算的 pivoted 表提取单列 [N, T] tensor。"""
+            if col_name not in all_pivot_cols:
+                return None
+            sub = pivoted.xs(col_name, level=1, axis=1)
+            # 对齐列顺序
+            sub = sub[[c for c in code_order if c in sub.columns]]
+            if ffill:
+                sub = sub.ffill()
+            return torch.tensor(sub.values.T, dtype=torch.float32, device=dev)
+
+        # close 不做 ffill，用于构建 suspended_mask
+        close_sub = pivoted.xs("close", level=1, axis=1)
+        close_sub = close_sub[[c for c in code_order if c in close_sub.columns]]
         suspended_mask = torch.tensor(
-            close_pivot.isna().values.T, dtype=torch.bool, device=ModelConfig.DEVICE
+            close_sub.isna().values.T, dtype=torch.bool, device=dev
         )
 
-        def to_tensor(col_name):
-            pivot = master.pivot(index="trade_date", columns="ts_code", values=col_name)
-            pivot = pivot.sort_index()
-            pivot = pivot[[c for c in loaded_codes if c in pivot.columns]]
-            pivot = pivot.ffill()
-            return torch.tensor(pivot.values.T, dtype=torch.float32, device=ModelConfig.DEVICE)
-
         self.raw_data_cache = {
-            "open":   to_tensor("open"),
-            "high":   to_tensor("high"),
-            "low":    to_tensor("low"),
-            "close":  to_tensor("close"),
-            "vol":    to_tensor("vol"),
-            "amount": to_tensor("amount"),
+            "open":      _col_to_tensor("open"),
+            "high":      _col_to_tensor("high"),
+            "low":       _col_to_tensor("low"),
+            "close":     _col_to_tensor("close"),
+            "vol":       _col_to_tensor("vol"),
+            "amount":    _col_to_tensor("amount"),
             "suspended": suspended_mask,
         }
 
         # turnover_rate
-        if "turnover_rate" in master.columns:
-            self.raw_data_cache["turnover_rate"] = to_tensor("turnover_rate")
+        if "turnover_rate" in all_pivot_cols:
+            self.raw_data_cache["turnover_rate"] = _col_to_tensor("turnover_rate")
         else:
             print("[WARN] 数据中无 turnover_rate 列，用成交量代理计算换手率")
             T = self.raw_data_cache["close"].shape[1]
@@ -311,26 +328,18 @@ class AshareDataLoader:
             self.raw_data_cache["turnover_rate"] = vol_ratio
 
         # 基本面指标
-        if "pe_ttm" in master.columns:
-            self.raw_data_cache["pe_ttm"] = to_tensor("pe_ttm")
-        if "pb" in master.columns:
-            self.raw_data_cache["pb"] = to_tensor("pb")
-        if "total_mv" in master.columns:
-            self.raw_data_cache["total_mv"] = to_tensor("total_mv")
+        for key in ("pe_ttm", "pb", "total_mv"):
+            t = _col_to_tensor(key)
+            if t is not None:
+                self.raw_data_cache[key] = t
         pe_ttm_t = self.raw_data_cache.get("pe_ttm")
         pb_t = self.raw_data_cache.get("pb")
         if pe_ttm_t is not None and pb_t is not None:
             self.raw_data_cache["roe"] = pb_t / pe_ttm_t
 
         # 6. 涨跌停掩码
-        if "pre_close" in master.columns:
-            pre_close_pivot = master.pivot(index="trade_date", columns="ts_code", values="pre_close")
-            pre_close_pivot = pre_close_pivot.sort_index()
-            pre_close_pivot = pre_close_pivot[[c for c in loaded_codes if c in pre_close_pivot.columns]]
-            pre_close_t = torch.tensor(
-                pre_close_pivot.values.T, dtype=torch.float32, device=ModelConfig.DEVICE
-            )
-        else:
+        pre_close_t = _col_to_tensor("pre_close")
+        if pre_close_t is None:
             close_t = self.raw_data_cache["close"]
             pre_close_t = torch.zeros_like(close_t)
             pre_close_t[:, 1:] = close_t[:, :-1]
@@ -367,10 +376,10 @@ class AshareDataLoader:
         #     adj_close[t] = close[0] * cumprod(1 + pct_chg/100)
         #     adj_open/high/low = adj_close * (x / close)  日内比率不受除权影响
         #     必须在涨跌停检测之后执行（涨跌停依赖原始价格）
-        if "pct_chg" in master.columns:
-            pct_chg_t = to_tensor("pct_chg") / 100.0          # [N, T] 日收益率
+        if "pct_chg" in all_pivot_cols:
+            pct_chg_t = _col_to_tensor("pct_chg") / 100.0     # [N, T] 日收益率
             close_raw = self.raw_data_cache["close"]           # [N, T]（已 ffill）
-            # to_tensor 做了 ffill，停牌日的 pct_chg/close 不是 NaN 而是前值，
+            # _col_to_tensor 做了 ffill，停牌日的 pct_chg/close 不是 NaN 而是前值，
             # 必须用 suspended_mask 显式跳过，否则停牌日会错误增长
             skip = torch.isnan(pct_chg_t) | torch.isnan(close_raw) | suspended_mask
             ret_safe = torch.where(skip, torch.zeros_like(pct_chg_t), pct_chg_t)
