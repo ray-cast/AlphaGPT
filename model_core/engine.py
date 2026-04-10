@@ -79,24 +79,22 @@ class AlphaEngine:
         """严格 Action Masking：确保生成合法的前缀表达式树。"""
         if max_len is None:
             max_len = ModelConfig.MAX_FORMULA_LEN
-        feat_count = len(self.model.features_list)
         vocab_size = self.model.vocab_size
         B = open_slots.shape[0]
         mask = torch.full((B, vocab_size), float('-inf'), device=ModelConfig.DEVICE)
         remaining_steps = max_len - step
 
-        # 已完成（open_slots==0）→ pad 第一个 feature，保证序列合法
+        # 已完成（open_slots==0）→ pad 第一个 feature
         done_mask = (open_slots == 0)
         mask[done_mask, 0] = 0.0
 
         active_mask = ~done_mask
-        # 剩余步数不够填坑 → 必须选 feature（arity=0）
-        must_pick_feat = (open_slots >= remaining_steps)
+        # 每个 token 仅当 arity <= remaining_steps - open_slots 时允许
+        # （该 token 消耗 1 步，其子树需 fill arity-1 个新 slot）
+        budget = (remaining_steps - open_slots).clamp(min=0)        # [B]
+        allowed = budget[:, None] >= self.arity_tens[None, :]       # [B, V]
+        mask[allowed & active_mask[:, None]] = 0.0
 
-        mask[active_mask, :feat_count] = 0.0  # features 始终可选
-        can_pick_op_mask = active_mask & (~must_pick_feat)
-        if can_pick_op_mask.any():
-            mask[can_pick_op_mask, feat_count:] = 0.0
         # 禁止在生成过程中输出 BOS token
         mask[:, self.model.bos_id] = float('-inf')
         return mask
