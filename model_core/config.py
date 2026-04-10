@@ -63,10 +63,3 @@ class ModelConfig:
     EXCLUDE_BSE = True              # 排除北交所 (8xxxxx)
     EXCLUDE_ST = True               # 排除 ST/*ST 股票
     IPO_MIN_DAYS = 250              # 上市最少N个自然日（过滤次新股，≈1年）
-
-    # ---------- SFT 热启动 ----------
-    SEED_FORMULA_NAMES = [         # 种子公式（名称格式，token ID 动态计算）
-        ("TS_RANK20", ["CLOSE"]),                  # 收盘价时序排名
-        ("TS_MEAN20", ["VOL"]),                    # 成交量均值
-    ]
-    SFT_STEPS = 0                  # SFT 预训练步数（0 = 关闭热启动）

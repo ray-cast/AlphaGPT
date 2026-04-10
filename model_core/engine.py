@@ -17,21 +17,16 @@ from .ops import OPS_CONFIG
 
 class AlphaEngine:
 
-    def __init__(self, use_lord_regularization=True, lord_decay_rate=1e-3, lord_num_iterations=5,
-                 seed_formulas=None, sft_steps=None):
+    def __init__(self, use_lord_regularization=True, lord_decay_rate=1e-3, lord_num_iterations=5):
         self.loader = AshareDataLoader()
         self.loader.load_data()
 
         self.model = NeuralSymbolicAlphaGenerator().to(ModelConfig.DEVICE)
 
-        # 动态构建种子公式 token IDs
-        self.seed_formulas = self._build_seed_formulas(seed_formulas)
-        self.sft_steps = sft_steps if sft_steps is not None else ModelConfig.SFT_STEPS
-
         # Standard optimizer
         self.opt = torch.optim.AdamW(self.model.parameters(), lr=5e-5, weight_decay=1e-5)
 
-        total_steps = ModelConfig.TRAIN_STEPS + self.sft_steps
+        total_steps = ModelConfig.TRAIN_STEPS
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             self.opt, T_max=total_steps, eta_min=1e-5
         )
@@ -79,26 +74,6 @@ class AlphaEngine:
             "best_formula": None,
             "best_decoded": None,
         }
-
-    def _build_seed_formulas(self, custom_seeds=None):
-        """从名称动态构建种子公式的 token ID 列表。"""
-        feat_name_to_id = {name: i for i, name in enumerate(self.model.features_list)}
-        op_name_to_id = {cfg[0]: i + len(self.model.features_list) for i, cfg in enumerate(OPS_CONFIG)}
-
-        seeds = []
-        for op_name, feat_names in ModelConfig.SEED_FORMULA_NAMES:
-            op_id = op_name_to_id.get(op_name)
-            feat_ids = [feat_name_to_id.get(fn) for fn in feat_names]
-            if op_id is None or any(fid is None for fid in feat_ids):
-                continue
-            seeds.append([op_id] + feat_ids)
-
-        if custom_seeds:
-            seeds.extend(custom_seeds)
-
-        max_len = ModelConfig.MAX_FORMULA_LEN
-        seeds = [s for s in seeds if len(s) <= max_len]
-        return seeds
 
     def _get_strict_mask(self, open_slots, step, max_len=None):
         """严格 Action Masking：确保生成合法的前缀表达式树。"""
@@ -183,12 +158,7 @@ class AlphaEngine:
 
     def train(self):
         lord_info = " (LoRD)" if self.use_lord else ""
-        sft_info = f" (SFT {self.sft_steps} steps)" if self.seed_formulas else ""
-        print(f"开始沪深300 Alpha Mining{lord_info}{sft_info}...")
-
-        # ========== SFT 预训练：从已知好公式热启动 ==========
-        if self.seed_formulas:
-            self._run_sft()
+        print(f"开始沪深300 Alpha Mining{lord_info}...")
 
         pbar = tqdm(range(ModelConfig.TRAIN_STEPS))
 
@@ -377,68 +347,6 @@ class AlphaEngine:
             with open("best_ashare_strategy.json", "w") as f:
                 _json.dump(strategy_info, f, ensure_ascii=False, indent=2)
             print(f"  策略已保存至 best_ashare_strategy.json")
-
-    def _run_sft(self):
-        """监督预训练：让 Transformer 学会生成已知有效公式，作为 RL 热启动。"""
-        all_seeds = self.seed_formulas
-        max_len = ModelConfig.MAX_FORMULA_LEN
-        all_seeds = [s for s in all_seeds if len(s) <= max_len]
-        if not all_seeds:
-            print("  [SFT] 无有效种子公式，跳过预训练")
-            return
-
-        print(f"  [SFT] 从 {len(all_seeds)} 个种子公式热启动...")
-        for seed in all_seeds:
-            print(f"    Seed: {self._decode(seed)}")
-
-        sft_opt = torch.optim.AdamW(self.model.parameters(), lr=1e-3)
-        self.model.train()
-
-        feat_count = len(self.model.features_list)
-
-        for step in range(self.sft_steps):
-            sft_opt.zero_grad()
-
-            # Round-robin：每步只训练一个公式，避免多公式共享初始状态导致的梯度冲突
-            formula = all_seeds[step % len(all_seeds)]
-            inp = torch.full((1, 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
-            loss = 0.0
-            for t, target_token in enumerate(formula):
-                logits, _, _ = self.model(inp)
-                target = torch.tensor([target_token], device=ModelConfig.DEVICE)
-                loss += F.cross_entropy(logits, target)
-                inp = torch.cat([inp, target.unsqueeze(0)], dim=1)
-
-            loss = loss / len(formula)
-            loss.backward()
-            sft_opt.step()
-
-            if (step + 1) % 10 == 0:
-                print(f"    [SFT] Step {step+1}/{self.sft_steps}, "
-                      f"formula {self._decode(formula)}, loss: {loss.item():.4f}")
-
-        # 验证：teacher-forced next-token 准确率
-        # 注意：多个公式共享初始 token [0]，greedy decoding 只能复现一条序列，
-        # 因此用 teacher-forced 逐 token 检查更合理。
-        self.model.eval()
-        with torch.no_grad():
-            for formula in all_seeds:
-                inp = torch.full((1, 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
-                correct = 0
-                for t, target_token in enumerate(formula):
-                    logits, _, _ = self.model(inp)
-                    pred = logits.argmax(dim=-1).item()
-                    if pred == target_token:
-                        correct += 1
-                    # Teacher forcing：使用正确 token 作为下一步输入
-                    inp = torch.cat([inp, torch.tensor([[target_token]],
-                                 device=ModelConfig.DEVICE)], dim=1)
-                acc = correct / len(formula) * 100
-                status = "OK" if correct == len(formula) else "PARTIAL"
-                print(f"    [SFT-Verify] {status}: {self._decode(formula)} "
-                      f"({correct}/{len(formula)} tokens, {acc:.0f}%)")
-
-        self.model.train()
 
     def _decode(self, tokens):
         """将 token 序列解码为可读公式字符串。"""
