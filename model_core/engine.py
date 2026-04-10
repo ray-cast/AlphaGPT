@@ -243,6 +243,11 @@ class AlphaEngine:
 
             unique_ratio = len(unique_map) / bs
 
+            # 清理 NaN rewards（如 POW|CLOSE|CONST_-20 产生 inf/nan）
+            nan_rew_count = torch.isnan(rewards).sum().item()
+            if nan_rew_count > 0:
+                rewards = rewards.nan_to_num(nan=-1.0)
+
             # ---- Phase 2: Old policy log_probs ----
             with torch.no_grad():
                 old_log_probs, old_values, _ = self._evaluate_sequences(seqs, current_max_len)

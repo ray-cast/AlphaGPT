@@ -39,8 +39,14 @@ class PrefixVM:
                     args.append(arg)
                 func = self.op_map[token]
                 res = func(*args)
+                # 常量 lambda 返回 Python float，需先转为 Tensor
+                if not isinstance(res, torch.Tensor):
+                    res = torch.tensor(res, device=clean_feat.device, dtype=torch.float32)
                 # 仅处理 Inf，NaN 不会出现（输入已清理）
                 res = torch.nan_to_num(res, nan=0.0, posinf=1.0, neginf=-1.0)
+                # 常数返回标量，广播为 [N, T] 以兼容时序算子
+                if res.ndim == 0:
+                    res = torch.full_like(clean_feat[:, 0, :], res.item())
                 return res
             else:
                 return None

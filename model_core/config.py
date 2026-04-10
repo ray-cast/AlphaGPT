@@ -24,7 +24,7 @@ class ModelConfig:
     # ---------- 训练参数 ----------
     BATCH_SIZE = 1024
     TRAIN_STEPS = 500
-    MAX_FORMULA_LEN = 10
+    MAX_FORMULA_LEN = 16
 
     # ---------- A股交易成本 ----------
     COMMISSION_RATE = 0.00025           # 佣金 万2.5（买卖双边）
@@ -43,7 +43,7 @@ class ModelConfig:
     GRAD_CLIP_NORM = 0.5     # 梯度裁剪范数
 
     # ---------- 探索与多样性 ----------
-    ENTROPY_COEF_START = 0.15      # 起始 entropy 系数
+    ENTROPY_COEF_START = 0.05      # 起始 entropy 系数
     ENTROPY_COEF_END = 0.01        # 终止 entropy 系数
     EPS_GREEDY_START = 0.1         # epsilon-greedy 起始值
     EPS_GREEDY_END = 0.01          # epsilon-greedy 终止值

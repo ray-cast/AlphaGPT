@@ -312,7 +312,22 @@ def _ts_cov(x: torch.Tensor, y: torch.Tensor, d: int) -> torch.Tensor:
     return ((wx - mx) * (wy - my)).sum(dim=-1) / d
 
 
+# ---- 窗口提取 ----
+
+VALID_WINDOWS = [5, 10, 20, 40]
+
+
+def _snap_window(w):
+    """从 tensor 参数提取窗口大小，snap 到最近合法值。"""
+    val = abs(float(w[0, 0]))
+    if val != val:  # NaN
+        return 20
+    return min(VALID_WINDOWS, key=lambda d: abs(d - val))
+
+
 # ---- 算子注册表 ----
+# 时序算子窗口由参数决定（第二/三参数），不再硬编码窗口大小。
+# 词汇表从 99 缩减到 ~47，模型搜索更高效。
 
 OPS_CONFIG = [
     # ---- 一元算子 ----
@@ -343,82 +358,27 @@ OPS_CONFIG = [
     ('CONST_5', lambda: 5.0, 0),
     ('CONST_10', lambda: 10.0, 0),
     ('CONST_20', lambda: 20.0, 0),
-    ('CONST_30', lambda: 30.0, 0),
-    # ---- 时序算子（5日窗口） ----
-    ('TS_REF5', lambda x: _ts_ref(x, 5), 1),
-    ('TS_MEAN5', lambda x: _ts_mean(x, 5), 1),
-    ('TS_SUM5', lambda x: _ts_sum(x, 5), 1),
-    ('TS_STD5', lambda x: _ts_std(x, 5), 1),
-    ('TS_VAR5', lambda x: _ts_var(x, 5), 1),
-    ('TS_SKEW5', lambda x: _ts_skew(x, 5), 1),
-    ('TS_KURT5', lambda x: _ts_kurt(x, 5), 1),
-    ('TS_MAX5', lambda x: _ts_max(x, 5), 1),
-    ('TS_MIN5', lambda x: _ts_min(x, 5), 1),
-    ('TS_MED5', lambda x: _ts_med(x, 5), 1),
-    ('TS_MAD5', lambda x: _ts_mad(x, 5), 1),
-    ('TS_RANK5', lambda x: _ts_rank(x, 5), 1),
-    ('TS_DELTA5', lambda x: _ts_delta(x, 5), 1),
-    ('TS_WMA5', lambda x: _ts_wma(x, 5), 1),
-    ('TS_EMA5', lambda x: _ts_ema(x, 5), 1),
-    ('TS_DELAY5', lambda x: _ts_delay(x, 5), 1),
-    ('TS_ARGMIN5', lambda x: _ts_argmin(x, 5), 1),
-    ('TS_ARGMAX5', lambda x: _ts_argmax(x, 5), 1),
-    ('TS_COV5', lambda x, y: _ts_cov(x, y, 5), 2),
-    ('TS_CORR5', lambda x, y: _ts_corr(x, y, 5), 2),
-    # ---- 时序算子（10日窗口） ----
-    ('TS_REF10', lambda x: _ts_ref(x, 10), 1),
-    ('TS_MEAN10', lambda x: _ts_mean(x, 10), 1),
-    ('TS_SUM10', lambda x: _ts_sum(x, 10), 1),
-    ('TS_STD10', lambda x: _ts_std(x, 10), 1),
-    ('TS_VAR10', lambda x: _ts_var(x, 10), 1),
-    ('TS_SKEW10', lambda x: _ts_skew(x, 10), 1),
-    ('TS_KURT10', lambda x: _ts_kurt(x, 10), 1),
-    ('TS_MAX10', lambda x: _ts_max(x, 10), 1),
-    ('TS_MIN10', lambda x: _ts_min(x, 10), 1),
-    ('TS_MED10', lambda x: _ts_med(x, 10), 1),
-    ('TS_MAD10', lambda x: _ts_mad(x, 10), 1),
-    ('TS_RANK10', lambda x: _ts_rank(x, 10), 1),
-    ('TS_DELTA10', lambda x: _ts_delta(x, 10), 1),
-    ('TS_DECAY10', lambda x: _ts_decay_linear(x, 10), 1),
-    ('TS_WMA10', lambda x: _ts_wma(x, 10), 1),
-    ('TS_EMA10', lambda x: _ts_ema(x, 10), 1),
-    ('TS_COV10', lambda x, y: _ts_cov(x, y, 10), 2),
-    ('TS_CORR10', lambda x, y: _ts_corr(x, y, 10), 2),
-    # ---- 时序算子（20日窗口） ----
-    ('TS_REF20', lambda x: _ts_ref(x, 20), 1),
-    ('TS_MEAN20', lambda x: _ts_mean(x, 20), 1),
-    ('TS_SUM20', lambda x: _ts_sum(x, 20), 1),
-    ('TS_STD20', lambda x: _ts_std(x, 20), 1),
-    ('TS_VAR20', lambda x: _ts_var(x, 20), 1),
-    ('TS_SKEW20', lambda x: _ts_skew(x, 20), 1),
-    ('TS_KURT20', lambda x: _ts_kurt(x, 20), 1),
-    ('TS_MAX20', lambda x: _ts_max(x, 20), 1),
-    ('TS_MIN20', lambda x: _ts_min(x, 20), 1),
-    ('TS_MED20', lambda x: _ts_med(x, 20), 1),
-    ('TS_MAD20', lambda x: _ts_mad(x, 20), 1),
-    ('TS_RANK20', lambda x: _ts_rank(x, 20), 1),
-    ('TS_DECAY20', lambda x: _ts_decay_linear(x, 20), 1),
-    ('TS_WMA20', lambda x: _ts_wma(x, 20), 1),
-    ('TS_EMA20', lambda x: _ts_ema(x, 20), 1),
-    ('TS_COV20', lambda x, y: _ts_cov(x, y, 20), 2),
-    ('TS_CORR20', lambda x, y: _ts_corr(x, y, 20), 2),
-    # ---- 时序算子（40日窗口：中长期趋势） ----
-    ('TS_REF40', lambda x: _ts_ref(x, 40), 1),
-    ('TS_MEAN40', lambda x: _ts_mean(x, 40), 1),
-    ('TS_SUM40', lambda x: _ts_sum(x, 40), 1),
-    ('TS_STD40', lambda x: _ts_std(x, 40), 1),
-    ('TS_VAR40', lambda x: _ts_var(x, 40), 1),
-    ('TS_SKEW40', lambda x: _ts_skew(x, 40), 1),
-    ('TS_KURT40', lambda x: _ts_kurt(x, 40), 1),
-    ('TS_MAX40', lambda x: _ts_max(x, 40), 1),
-    ('TS_MIN40', lambda x: _ts_min(x, 40), 1),
-    ('TS_MED40', lambda x: _ts_med(x, 40), 1),
-    ('TS_MAD40', lambda x: _ts_mad(x, 40), 1),
-    ('TS_RANK40', lambda x: _ts_rank(x, 40), 1),
-    ('TS_DECAY40', lambda x: _ts_decay_linear(x, 40), 1),
-    ('TS_DELTA40', lambda x: _ts_delta(x, 40), 1),
-    ('TS_WMA40', lambda x: _ts_wma(x, 40), 1),
-    ('TS_EMA40', lambda x: _ts_ema(x, 40), 1),
-    ('TS_COV40', lambda x, y: _ts_cov(x, y, 40), 2),
-    ('TS_CORR40', lambda x, y: _ts_corr(x, y, 40), 2),
+    ('CONST_40', lambda: 40.0, 0),
+    # ---- 时序算子（单序列，arity=2，第二参数决定窗口） ----
+    ('TS_REF', lambda x, w: _ts_ref(x, _snap_window(w)), 2),
+    ('TS_MEAN', lambda x, w: _ts_mean(x, _snap_window(w)), 2),
+    ('TS_SUM', lambda x, w: _ts_sum(x, _snap_window(w)), 2),
+    ('TS_STD', lambda x, w: _ts_std(x, _snap_window(w)), 2),
+    ('TS_VAR', lambda x, w: _ts_var(x, _snap_window(w)), 2),
+    ('TS_SKEW', lambda x, w: _ts_skew(x, _snap_window(w)), 2),
+    ('TS_KURT', lambda x, w: _ts_kurt(x, _snap_window(w)), 2),
+    ('TS_MAX', lambda x, w: _ts_max(x, _snap_window(w)), 2),
+    ('TS_MIN', lambda x, w: _ts_min(x, _snap_window(w)), 2),
+    ('TS_MED', lambda x, w: _ts_med(x, _snap_window(w)), 2),
+    ('TS_MAD', lambda x, w: _ts_mad(x, _snap_window(w)), 2),
+    ('TS_RANK', lambda x, w: _ts_rank(x, _snap_window(w)), 2),
+    ('TS_DELTA', lambda x, w: _ts_delta(x, _snap_window(w)), 2),
+    ('TS_DECAY', lambda x, w: _ts_decay_linear(x, _snap_window(w)), 2),
+    ('TS_WMA', lambda x, w: _ts_wma(x, _snap_window(w)), 2),
+    ('TS_EMA', lambda x, w: _ts_ema(x, _snap_window(w)), 2),
+    ('TS_ARGMIN', lambda x, w: _ts_argmin(x, _snap_window(w)), 2),
+    ('TS_ARGMAX', lambda x, w: _ts_argmax(x, _snap_window(w)), 2),
+    # ---- 双序列时序算子（arity=3，第三参数决定窗口） ----
+    ('TS_COV', lambda x, y, w: _ts_cov(x, y, _snap_window(w)), 3),
+    ('TS_CORR', lambda x, y, w: _ts_corr(x, y, _snap_window(w)), 3),
 ]
