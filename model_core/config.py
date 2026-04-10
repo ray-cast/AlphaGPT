@@ -42,6 +42,10 @@ class ModelConfig:
     PPO_CLIP_EPS = 0.2       # PPO clip epsilon
     GRAD_CLIP_NORM = 0.5     # 梯度裁剪范数
 
+    # ---------- GAE (Generalized Advantage Estimation) ----------
+    GAMMA = 0.99             # 折扣因子，权衡未来奖励
+    GAE_LAMBDA = 0.95        # GAE参数，平衡偏差和方差（0=当前，1=累积）
+
     # ---------- 探索与多样性 ----------
     ENTROPY_COEF_START = 0.05      # 起始 entropy 系数
     ENTROPY_COEF_END = 0.01        # 终止 entropy 系数

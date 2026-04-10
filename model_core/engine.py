@@ -154,6 +154,40 @@ class AlphaEngine:
             torch.stack(entropies, 1).sum(1),            # [B] total_entropy
         )
 
+    def _compute_gae(self, rewards, values, gamma, lambda_gae):
+        """
+        计算Generalized Advantage Estimation (GAE)。
+        平衡偏差和方差，比简单的adv = rewards - baseline更稳定。
+
+        Args:
+            rewards: [B] 每个序列的即时奖励
+            values: [B] 每个序列的baseline值（critic输出）
+            gamma: 折扣因子（通常0.99）
+            lambda_gae: GAE参数（通常0.95，0=当前，1=累积）
+
+        Returns:
+            advantages: [B] 计算得到的advantages
+        """
+        advantages = torch.zeros_like(rewards)
+        last_advantage = 0
+
+        # 反向计算GAE
+        for t in reversed(range(rewards.size(0))):
+            if t == rewards.size(0) - 1:
+                next_value = 0  # 最后一个状态没有未来
+            else:
+                next_value = values[t + 1]
+
+            # TD error: δ_t = r_t + γV(s_{t+1}) - V(s_t)
+            delta = rewards[t] + gamma * next_value - values[t]
+
+            # GAE累积: A_t = δ_t + γλA_{t+1}
+            advantages[t] = last_advantage = delta + gamma * lambda_gae * last_advantage
+
+        # 标准化advantages（保持数值稳定）
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        return advantages
+
     def train(self):
         lord_info = " (LoRD)" if self.use_lord else ""
         print(f"开始沪深300 Alpha Mining{lord_info}...")
@@ -252,20 +286,19 @@ class AlphaEngine:
             with torch.no_grad():
                 old_log_probs, old_values, _ = self._evaluate_sequences(seqs, current_max_len)
 
-            # ---- Phase 3: Advantage (top-k + critic baseline) ----
-            rew_std = rewards.std() + 1e-6
-            raw_normalized = (rewards - rewards.mean()) / rew_std
-            raw_normalized = raw_normalized.clamp(-2, 2)
-
-            topk_ratio = max(0.1, 0.3 - 0.2 * progress)
-            k = max(int(bs * topk_ratio), 10)
-            sorted_indices = rewards.argsort(descending=True)
-
-            adv = torch.zeros(bs, device=ModelConfig.DEVICE)
-            adv[sorted_indices[:k]] = raw_normalized[sorted_indices[:k]]
-
-            adv = adv - old_values.detach()
-            adv = adv - adv.mean()
+            # ---- Phase 3: Advantage (GAE - Generalized Advantage Estimation) ----
+            # 使用GAE替代简单的top-k + baseline方法
+            # GAE的优势：
+            # 1. 考虑累积效应（不仅是即时奖励）
+            # 2. 利用全部样本（不再只取top-k）
+            # 3. 平衡偏差和方差，提供更稳定的训练信号
+            # 4. 不再强制中心化，保持真实的梯度信号
+            adv = self._compute_gae(
+                rewards.detach(),
+                old_values.detach(),
+                gamma=ModelConfig.GAMMA,
+                lambda_gae=ModelConfig.GAE_LAMBDA
+            )
 
             # Entropy 系数线性退火（比余弦退火探索期更长）
             entropy_coef = ModelConfig.ENTROPY_COEF_START * (1 - progress) + ModelConfig.ENTROPY_COEF_END * progress
