@@ -12,12 +12,6 @@ def _ts_delay(x: torch.Tensor, d: int) -> torch.Tensor:
 
 
 @torch.jit.script
-def _signedpower(x: torch.Tensor) -> torch.Tensor:
-    """WQ101 核心算子：sign(x) * |x|^0.5，非线性信号放大。"""
-    return torch.sign(x) * torch.pow(torch.abs(x) + 1e-8, 0.5)
-
-
-@torch.jit.script
 def _op_jump(x: torch.Tensor) -> torch.Tensor:
     # expanding window z-score，避免未来数据泄漏
     # 使用 nan-safe 累积和，防止 NaN 永久传播
@@ -335,8 +329,7 @@ OPS_CONFIG = [
     ('SIGN', torch.sign, 1),
     ('LOG', lambda x: torch.log(x.abs() + 1e-8), 1),
     ('NEG', lambda x: -x, 1),
-    ('SIGNEDPOWER', _signedpower, 1),
-    # ---- 二元算子 ----
+        # ---- 二元算子 ----
     ('ADD', lambda x, y: x + y, 2),
     ('SUB', lambda x, y: x - y, 2),
     ('MUL', lambda x, y: x * y, 2),

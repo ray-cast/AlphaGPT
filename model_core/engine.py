@@ -24,7 +24,7 @@ class AlphaEngine:
         self.model = NeuralSymbolicAlphaGenerator().to(ModelConfig.DEVICE)
 
         # Standard optimizer
-        self.opt = torch.optim.AdamW(self.model.parameters(), lr=5e-5, weight_decay=1e-5)
+        self.opt = torch.optim.AdamW(self.model.parameters(), lr=1e-5, weight_decay=1e-5)
 
         total_steps = ModelConfig.TRAIN_STEPS
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(

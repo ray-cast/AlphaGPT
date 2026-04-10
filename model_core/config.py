@@ -47,10 +47,10 @@ class ModelConfig:
     GAE_LAMBDA = 0.95        # GAE参数，平衡偏差和方差（0=当前，1=累积）
 
     # ---------- 探索与多样性 ----------
-    ENTROPY_COEF_START = 0.05      # 起始 entropy 系数
-    ENTROPY_COEF_END = 0.01        # 终止 entropy 系数
-    EPS_GREEDY_START = 0.1         # epsilon-greedy 起始值
-    EPS_GREEDY_END = 0.01          # epsilon-greedy 终止值
+    ENTROPY_COEF_START = 0.1        # 起始 entropy 系数 (提高探索)
+    ENTROPY_COEF_END = 0.02         # 终止 entropy 系数 (保持适度探索)
+    EPS_GREEDY_START = 0.3         # epsilon-greedy 起始值 (提高探索)
+    EPS_GREEDY_END = 0.05          # epsilon-greedy 终止值 (保持适度探索)
 
     # ---------- 因子维度 ----------
     INPUT_DIM = 6
