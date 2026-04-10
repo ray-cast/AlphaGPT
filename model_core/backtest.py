@@ -52,7 +52,7 @@ class AshareBacktest:
             start_idx:  起始时间索引（含）
             end_idx:    结束时间索引（不含），None 表示到末尾
         Returns:
-            (fitness: scalar tensor, cum_ret: float, daily_pnl: tensor)
+            (fitness: scalar tensor, cum_ret: float, daily_pnl: tensor, sharpe: float)
         """
         turnover_rate = raw_data.get("turnover_rate",
                             torch.zeros_like(factors))
@@ -92,4 +92,14 @@ class AshareBacktest:
         else:
             fitness = torch.tensor(0.0, device=factors.device)
 
-        return fitness, daily_pnl.sum().item(), daily_pnl
+        # 计算夏普比率
+        cum_ret = daily_pnl.sum().item()
+        if T_len > 0:
+            daily_ret_np = daily_pnl.cpu().numpy()
+            ann_ret = (1 + cum_ret) ** (252 / T_len) - 1
+            ann_vol = daily_ret_np.std() * (252 ** 0.5)
+            sharpe = (ann_ret - 0.02) / (ann_vol + 1e-6)
+        else:
+            sharpe = 0.0
+
+        return fitness, cum_ret, daily_pnl, sharpe

@@ -13,6 +13,7 @@ from .model import NeuralSymbolicAlphaGenerator, NewtonSchulzLowRankDecay, Stabl
 from .vm import PrefixVM
 from .backtest import AshareBacktest
 from .ops import OPS_CONFIG
+from .ensemble import AlphaEnsemble
 
 
 class AlphaEngine:
@@ -56,6 +57,9 @@ class AlphaEngine:
         self.train_end = self.loader.train_end
         self.test_start = self.loader.test_start
         self.test_end = self.loader.test_end
+
+        # Ensemble 用于计算 ensemble IC 作为 PPO 奖励
+        self.ensemble = AlphaEnsemble(max_size=10, ic_threshold=0.02)
 
         # 预计算 arity 张量，供 rollout 和 _evaluate_sequences 共用
         feat_count = len(self.model.features_list)
@@ -234,8 +238,9 @@ class AlphaEngine:
             # 公式去重：相同公式只执行一次，结果映射回原位置
             formulas = seqs.tolist()
 
-            unique_map = {}  # tuple(formula) -> (score, ret_val)
+            unique_map = {}  # tuple(formula) -> (score, ret_val, alpha_values)
             formula_keys = [None] * bs  # 缓存 trimmed keys，避免重复计算
+            candidate_strategies = []  # 暂存候选策略，用于计算 ensemble IC
 
             for i in range(bs):
                 # 更新进度条描述显示当前正在计算的公式
@@ -252,7 +257,7 @@ class AlphaEngine:
                 fkey = tuple(trimmed)
                 formula_keys[i] = fkey
                 if fkey in unique_map:
-                    score, _ = unique_map[fkey]
+                    score, _, _ = unique_map[fkey]
                     rewards[i] = score
                     # 缓存命中时更新为缓存状态
                     pbar.set_description(f"缓存: {current_formula}")
@@ -264,22 +269,32 @@ class AlphaEngine:
                     clean_feat=self.loader.clean_feat_tensor)
 
                 if res is None:
-                    unique_map[fkey] = (-1.0, 0.0)
+                    unique_map[fkey] = (-1.0, 0.0, None)
                     rewards[i] = -1.0
                     continue
 
                 if res.std() < 1e-4:
-                    unique_map[fkey] = (-0.5, 0.0)
+                    unique_map[fkey] = (-0.5, 0.0, res)
                     rewards[i] = -0.5
                     continue
 
-                score, ret_val, _ = self.bt.evaluate(
+                score, ret_val, _, sharpe = self.bt.evaluate(
                     res, self.loader.raw_data_cache, self.loader.target_ret,
                     start_idx=self.train_start, end_idx=self.train_end
                 )
 
-                unique_map[fkey] = (score.item(), ret_val)
-                rewards[i] = score
+                # 保存单个策略信息
+                unique_map[fkey] = (score.item(), ret_val, res)
+
+                # 保存候选策略（用于 ensemble IC 计算）
+                if score.item() > 0.02:  # IC 阈值
+                    candidate_strategies.append({
+                        'formula': trimmed,
+                        'alpha_values': res,
+                        'ic': score.item(),
+                        'cum_ret': ret_val,
+                        'decoded': self._decode(trimmed)
+                    })
 
                 if score.item() > self.best_score:
                     self.best_score = score.item()
@@ -288,10 +303,58 @@ class AlphaEngine:
                     decoded = self._decode(trimmed)
                     tqdm.write(
                         f"[!] New Best: Score {score:.2f} "
-                        f"CumRet {ret_val:.2%} | {decoded}"
+                        f"CumRet {ret_val:.2%} "
+                        f"Sharpe {sharpe:.2f} | {decoded}"
                     )
 
             unique_ratio = len(unique_map) / bs
+
+            # ---- 计算 Ensemble IC 作为奖励 ----
+            if len(candidate_strategies) >= 1:
+                # 将候选策略添加到 ensemble
+                for strategy in candidate_strategies:
+                    self.ensemble.add_strategy(
+                        formula=strategy['formula'],
+                        score=strategy['ic'],
+                        cum_ret=strategy['cum_ret'],
+                        ic=strategy['ic'],
+                        decoded=strategy['decoded']
+                    )
+
+                # 计算 ensemble factors（使用 candidate_strategies 中的 alpha_values）
+                alpha_values_list = [s['alpha_values'] for s in candidate_strategies]
+
+                # 手动计算 ensemble factors（标准化后加权组合）
+                normalized_factors = []
+                for alpha in alpha_values_list:
+                    normalized = (alpha - alpha.mean()) / (alpha.std() + 1e-8)
+                    normalized_factors.append(normalized)
+
+                if len(normalized_factors) >= 1:
+                    # 等权重组合
+                    ensemble_factors = torch.stack(normalized_factors).mean(dim=0)
+
+                    # 计算 ensemble IC
+                    valid_mask = ~(torch.isnan(ensemble_factors) | torch.isnan(self.loader.target_ret[:, self.train_start:self.train_end]))
+                    ensemble_ic = self.ensemble.calculate_ensemble_ic(
+                        ensemble_factors,
+                        self.loader.target_ret[:, self.train_start:self.train_end],
+                        valid_mask
+                    )
+
+                    # 使用 ensemble IC 更新 rewards（只更新候选策略的奖励）
+                    for i in range(bs):
+                        fkey = formula_keys[i]
+                        if fkey in unique_map:
+                            score, ret_val, _ = unique_map[fkey]
+                            # 检查是否是候选策略
+                            decoded = self._decode(torch.tensor(fkey))
+                            is_candidate = any(
+                                s['decoded'] == decoded for s in candidate_strategies
+                            )
+                            if is_candidate and ensemble_ic > 0:
+                                # 使用 ensemble IC 作为奖励（保留 10 倍缩放）
+                                rewards[i] = ensemble_ic * 10.0
 
             # 清理 NaN rewards（如 POW|CLOSE|CONST_-20 产生 inf/nan）
             nan_rew_count = torch.isnan(rewards).sum().item()
