@@ -161,7 +161,8 @@ class AlphaEngine:
         log_probs, values, entropies = [], [], []
 
         for t in range(T):
-            logits, val, _ = self.model(inp_buf[:, :t + 1])
+            inp = inp_buf[:, :t + 1].clone()
+            logits, val, _ = self.model(inp)
             mask = self._get_strict_mask(open_slots, t, max_len)
             dist = Categorical(logits=(logits + mask))
             action = seqs[:, t]
@@ -170,6 +171,7 @@ class AlphaEngine:
             values.append(val)
             entropies.append(dist.entropy())
 
+            inp_buf = inp_buf.clone()
             inp_buf[:, t + 1] = action
             self._step_open_slots(open_slots, action)
 
