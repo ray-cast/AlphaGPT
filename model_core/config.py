@@ -24,7 +24,7 @@ class ModelConfig:
     # ---------- 训练参数 ----------
     BATCH_SIZE = 1024
     TRAIN_STEPS = 500
-    MAX_FORMULA_LEN = 16
+    MAX_FORMULA_LEN = 10
 
     # ---------- A股交易成本 ----------
     COMMISSION_RATE = 0.00025           # 佣金 万2.5（买卖双边）
@@ -49,8 +49,6 @@ class ModelConfig:
     # ---------- 探索与多样性 ----------
     ENTROPY_COEF_START = 0.1        # 起始 entropy 系数 (提高探索)
     ENTROPY_COEF_END = 0.02         # 终止 entropy 系数 (保持适度探索)
-    EPS_GREEDY_START = 0.3         # epsilon-greedy 起始值 (提高探索)
-    EPS_GREEDY_END = 0.05          # epsilon-greedy 终止值 (保持适度探索)
 
     # ---------- 因子维度 ----------
     INPUT_DIM = 6

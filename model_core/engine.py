@@ -13,7 +13,6 @@ from .model import NeuralSymbolicAlphaGenerator, NewtonSchulzLowRankDecay, Stabl
 from .vm import PrefixVM
 from .backtest import AshareBacktest
 from .ops import OPS_CONFIG
-from .ensemble import AlphaEnsemble
 
 
 class AlphaEngine:
@@ -25,7 +24,7 @@ class AlphaEngine:
         self.model = NeuralSymbolicAlphaGenerator().to(ModelConfig.DEVICE)
 
         # Standard optimizer
-        self.opt = torch.optim.AdamW(self.model.parameters(), lr=1e-5, weight_decay=1e-5)
+        self.opt = torch.optim.AdamW(self.model.parameters(), lr=1e-3)
 
         total_steps = ModelConfig.TRAIN_STEPS
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -58,9 +57,6 @@ class AlphaEngine:
         self.test_start = self.loader.test_start
         self.test_end = self.loader.test_end
 
-        # Ensemble 用于计算 ensemble IC 作为 PPO 奖励
-        self.ensemble = AlphaEnsemble(max_size=10, ic_threshold=0.02)
-
         # 预计算 arity 张量，供 rollout 和 _evaluate_sequences 共用
         feat_count = len(self.model.features_list)
         self.arity_tens = torch.zeros(self.model.vocab_size, dtype=torch.long, device=ModelConfig.DEVICE)
@@ -75,6 +71,8 @@ class AlphaEngine:
             "best_score": [],
             "stable_rank": [],
             "total_loss": [],
+            "policy_loss": [],
+            "value_loss": [],
             "best_formula": None,
             "best_decoded": None,
         }
@@ -104,14 +102,15 @@ class AlphaEngine:
         return mask
 
     def _step_open_slots(self, open_slots, action):
-        """根据 action token 更新 open_slots 计数器（in-place）。"""
+        """根据 action token 更新 open_slots 计数器（非in-place）。"""
         feat_count = len(self.model.features_list)
         is_op = action >= feat_count
         op_delta = self.arity_tens[action] - 1
         feat_delta = torch.full_like(action, -1)
         delta = torch.where(is_op, op_delta, feat_delta)
         delta[open_slots == 0] = 0
-        open_slots += delta
+        open_slots = open_slots + delta  # 避免inplace操作
+        return open_slots
 
     @staticmethod
     def _valid_prefix_len(tokens, feat_count, arity_map):
@@ -129,72 +128,9 @@ class AlphaEngine:
                 return i + 1
         return len(tokens)
 
-    def _evaluate_sequences(self, seqs, max_len):
-        """Teacher-forcing: 用当前模型重新评估序列的 log_probs, values, entropy。"""
-        B, T = seqs.shape
-        open_slots = torch.ones(B, dtype=torch.long, device=ModelConfig.DEVICE)
-        inp_buf = torch.full((B, T + 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
-
-        log_probs, values, entropies = [], [], []
-
-        for t in range(T):
-            inp = inp_buf[:, :t + 1].clone()
-            logits, val, _ = self.model(inp)
-            mask = self._get_strict_mask(open_slots, t, max_len)
-            dist = Categorical(logits=(logits + mask))
-            action = seqs[:, t]
-
-            log_probs.append(dist.log_prob(action))
-            values.append(val)
-            entropies.append(dist.entropy())
-
-            inp_buf = inp_buf.clone()
-            inp_buf[:, t + 1] = action
-            self._step_open_slots(open_slots, action)
-
-        return (
-            torch.stack(log_probs, 1).sum(1),           # [B] total_log_prob
-            torch.stack(values, 1).squeeze(-1).mean(1),  # [B] mean_value
-            torch.stack(entropies, 1).sum(1),            # [B] total_entropy
-        )
-
-    def _compute_gae(self, rewards, values, gamma, lambda_gae):
-        """
-        计算Generalized Advantage Estimation (GAE)。
-        平衡偏差和方差，比简单的adv = rewards - baseline更稳定。
-
-        Args:
-            rewards: [B] 每个序列的即时奖励
-            values: [B] 每个序列的baseline值（critic输出）
-            gamma: 折扣因子（通常0.99）
-            lambda_gae: GAE参数（通常0.95，0=当前，1=累积）
-
-        Returns:
-            advantages: [B] 计算得到的advantages
-        """
-        advantages = torch.zeros_like(rewards)
-        last_advantage = 0
-
-        # 反向计算GAE
-        for t in reversed(range(rewards.size(0))):
-            if t == rewards.size(0) - 1:
-                next_value = 0  # 最后一个状态没有未来
-            else:
-                next_value = values[t + 1]
-
-            # TD error: δ_t = r_t + γV(s_{t+1}) - V(s_t)
-            delta = rewards[t] + gamma * next_value - values[t]
-
-            # GAE累积: A_t = δ_t + γλA_{t+1}
-            advantages[t] = last_advantage = delta + gamma * lambda_gae * last_advantage
-
-        # 标准化advantages（保持数值稳定）
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        return advantages
-
     def train(self):
         lord_info = " (LoRD)" if self.use_lord else ""
-        print(f"开始沪深300 Alpha Mining{lord_info}...")
+        print(f"开始沪深300 Alpha Mining{lord_info} (REINFORCE)...")
 
         pbar = tqdm(range(ModelConfig.TRAIN_STEPS))
 
@@ -208,28 +144,50 @@ class AlphaEngine:
             current_max_len = ModelConfig.MAX_FORMULA_LEN
 
             bs = ModelConfig.BATCH_SIZE
-            progress = step / max(ModelConfig.TRAIN_STEPS - 1, 1)
 
             # 初始化进度条描述
             pbar.set_description(f"生成公式...")
 
-            # --- Phase 1: Rollout (no grad) ---
-            eps = ModelConfig.EPS_GREEDY_START * (1 - progress) + ModelConfig.EPS_GREEDY_END * progress
+            # --- Phase 1: Rollout (需要梯度用于log_probs) ---
+            # 初始化（这些tensor不需要梯度）
             with torch.no_grad():
                 open_slots = torch.ones(bs, dtype=torch.long, device=ModelConfig.DEVICE)
-                inp_buf = torch.full((bs, current_max_len + 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
-                tokens_list = []
-                for t in range(current_max_len):
-                    logits, _, _ = self.model(inp_buf[:, :t + 1])
+                bos_tokens = torch.full((bs, 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
+
+            # 累积式序列生成：inp_buf 在循环中不断追加token，保持梯度连接
+            inp_buf = bos_tokens  # [bs, 1]
+
+            tokens_list = []
+            log_probs = []
+            values = []
+
+            for t in range(current_max_len):
+                # 前向传播（需要梯度）- 直接使用累积的inp_buf
+                logits, value, _ = self.model(inp_buf)
+
+                # Mask操作
+                with torch.no_grad():
                     mask = self._get_strict_mask(open_slots, t, current_max_len)
-                    dist = Categorical(logits=(logits + mask))
-                    # epsilon-greedy: 以 eps 概率在有效动作空间均匀采样
-                    uniform = Categorical(probs=mask.softmax(dim=1).clamp(min=1e-8))
-                    use_random = torch.rand(bs, device=ModelConfig.DEVICE) < eps
-                    action = torch.where(use_random, uniform.sample(), dist.sample())
-                    tokens_list.append(action)
-                    inp_buf[:, t + 1] = action
-                    self._step_open_slots(open_slots, action)
+
+                masked_logits = logits + mask
+                dist = Categorical(logits=masked_logits)
+
+                # 直接使用 policy 采样
+                with torch.no_grad():
+                    action = dist.sample()
+                    open_slots = self._step_open_slots(open_slots, action)
+
+                # 收集 critic value
+                values.append(value.squeeze(-1))  # value维度是 [Batch, 1]，去掉最后一个维度
+
+                # Log prob计算需要梯度
+                action_log_prob = dist.log_prob(action)
+
+                log_probs.append(action_log_prob)
+                tokens_list.append(action)
+
+                # 将新token追加到inp_buf，保持梯度连接
+                inp_buf = torch.cat([inp_buf, action.unsqueeze(1)], dim=1)  # [bs, t+2]
 
             seqs = torch.stack(tokens_list, dim=1)
 
@@ -240,7 +198,6 @@ class AlphaEngine:
 
             unique_map = {}  # tuple(formula) -> (score, ret_val, alpha_values)
             formula_keys = [None] * bs  # 缓存 trimmed keys，避免重复计算
-            candidate_strategies = []  # 暂存候选策略，用于计算 ensemble IC
 
             for i in range(bs):
                 # 更新进度条描述显示当前正在计算的公式
@@ -286,139 +243,99 @@ class AlphaEngine:
                 # 保存单个策略信息
                 unique_map[fkey] = (score.item(), ret_val, res)
 
-                # 保存候选策略（用于 ensemble IC 计算）
-                if score.item() > 0.02:  # IC 阈值
-                    candidate_strategies.append({
-                        'formula': trimmed,
-                        'alpha_values': res,
-                        'ic': score.item(),
-                        'cum_ret': ret_val,
-                        'decoded': self._decode(trimmed)
-                    })
-
                 if score.item() > self.best_score:
                     self.best_score = score.item()
                     self.best_formula = trimmed
                     self.patience_counter = 0  # 重置早停计数器
                     decoded = self._decode(trimmed)
                     tqdm.write(
-                        f"[!] New Best: Score {score:.2f} "
+                        f"[!] New Best: Score {score:.3f} "
                         f"CumRet {ret_val:.2%} "
                         f"Sharpe {sharpe:.2f} | {decoded}"
                     )
 
+                    # 立即写盘保存最佳分数
+                    self.training_history["best_formula"] = self.best_formula
+                    self.training_history["best_decoded"] = decoded
+                    self.training_history["best_score"].append(self.best_score)
+                    with open("training_history.json", "w") as f:
+                        json.dump(self.training_history, f, ensure_ascii=False, indent=2)
+
             unique_ratio = len(unique_map) / bs
 
-            # ---- 计算 Ensemble IC 作为奖励 ----
-            if len(candidate_strategies) >= 1:
-                # 将候选策略添加到 ensemble
-                for strategy in candidate_strategies:
-                    self.ensemble.add_strategy(
-                        formula=strategy['formula'],
-                        score=strategy['ic'],
-                        cum_ret=strategy['cum_ret'],
-                        ic=strategy['ic'],
-                        decoded=strategy['decoded']
-                    )
+            # --- Phase 2: Actor-Critic Update ---
+            # 3. Update (REINFORCE with critic baseline)
 
-                # 计算 ensemble factors（使用 candidate_strategies 中的 alpha_values）
-                alpha_values_list = [s['alpha_values'] for s in candidate_strategies]
+            # 将values堆叠：[bs, max_len]
+            stacked_values = torch.stack(values, dim=1)  # [bs, max_len]
 
-                # 手动计算 ensemble factors（标准化后加权组合）
-                normalized_factors = []
-                for alpha in alpha_values_list:
-                    normalized = (alpha - alpha.mean()) / (alpha.std() + 1e-8)
-                    normalized_factors.append(normalized)
+            # Critic预测：使用所有时间步value的加权平均作为序列价值预测
+            # 使用最后一个有效位置的value权重更大
+            value_pred = stacked_values.mean(dim=1)  # [bs]
 
-                if len(normalized_factors) >= 1:
-                    # 等权重组合
-                    ensemble_factors = torch.stack(normalized_factors).mean(dim=0)
+            # 计算advantage
+            baseline = value_pred.detach()
+            adv = rewards - baseline
 
-                    # 计算 ensemble IC
-                    valid_mask = ~(torch.isnan(ensemble_factors) | torch.isnan(self.loader.target_ret[:, self.train_start:self.train_end]))
-                    ensemble_ic = self.ensemble.calculate_ensemble_ic(
-                        ensemble_factors,
-                        self.loader.target_ret[:, self.train_start:self.train_end],
-                        valid_mask
-                    )
+            # 数值稳定性：裁剪 advantage 防止极端值
+            adv = adv.clamp(-5.0, 5.0)
 
-                    # 使用 ensemble IC 更新 rewards（只更新候选策略的奖励）
-                    for i in range(bs):
-                        fkey = formula_keys[i]
-                        if fkey in unique_map:
-                            score, ret_val, _ = unique_map[fkey]
-                            # 检查是否是候选策略
-                            decoded = self._decode(torch.tensor(fkey))
-                            is_candidate = any(
-                                s['decoded'] == decoded for s in candidate_strategies
-                            )
-                            if is_candidate and ensemble_ic > 0:
-                                # 使用 ensemble IC 作为奖励（保留 10 倍缩放）
-                                rewards[i] = ensemble_ic * 10.0
+            # Policy loss：整个序列的log概率 * advantage（带discount factor）
+            # log_probs: [max_len, bs]，需要转置为 [bs, max_len]
+            stacked_log_probs = torch.stack(log_probs, dim=1)  # [bs, max_len]
 
-            # 清理 NaN rewards（如 POW|CLOSE|CONST_-20 产生 inf/nan）
-            nan_rew_count = torch.isnan(rewards).sum().item()
-            if nan_rew_count > 0:
-                rewards = rewards.nan_to_num(nan=-1.0)
+            # 添加discount factor：早先生成的token权重更大（gamma > 1表示放大早期token的影响）
+            # 对于"奖励只在最后"的情况，让早期token有更大权重更合理
+            gamma = 1.0
+            discount_weights = torch.tensor(
+                [gamma ** (current_max_len - 1 - t) for t in range(current_max_len)],
+                device=ModelConfig.DEVICE
+            )  # [max_len]
+            weighted_log_probs = (stacked_log_probs * discount_weights.unsqueeze(0)).sum(dim=1)  # [bs]
+            policy_loss = -(weighted_log_probs * adv).mean()
 
-            # ---- Phase 2: Old policy log_probs ----
-            with torch.no_grad():
-                old_log_probs, old_values, _ = self._evaluate_sequences(seqs, current_max_len)
+            # Critic value loss: 让 critic 学习预测 reward
+            value_loss = F.mse_loss(value_pred, rewards.detach())
 
-            # ---- Phase 3: Advantage (GAE - Generalized Advantage Estimation) ----
-            # 使用GAE替代简单的top-k + baseline方法
-            # GAE的优势：
-            # 1. 考虑累积效应（不仅是即时奖励）
-            # 2. 利用全部样本（不再只取top-k）
-            # 3. 平衡偏差和方差，提供更稳定的训练信号
-            # 4. 不再强制中心化，保持真实的梯度信号
-            adv = self._compute_gae(
-                rewards.detach(),
-                old_values.detach(),
-                gamma=ModelConfig.GAMMA,
-                lambda_gae=ModelConfig.GAE_LAMBDA
-            )
+            # Total loss
+            loss = policy_loss + 0.5 * value_loss
 
-            # Entropy 系数线性退火（比余弦退火探索期更长）
-            entropy_coef = ModelConfig.ENTROPY_COEF_START * (1 - progress) + ModelConfig.ENTROPY_COEF_END * progress
+            # 检查 loss 是否有效
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"警告: Step {step} 检测到无效 loss，跳过更新")
+                continue
 
-            # ---- Phase 4: PPO Update ----
-            total_loss_val = 0.0
-            for _ in range(ModelConfig.PPO_EPOCHS):
-                new_log_probs, new_values, new_entropy = self._evaluate_sequences(seqs, current_max_len)
+            # 梯度更新（带梯度裁剪）
+            self.opt.zero_grad()
+            loss.backward()
 
-                ratio = torch.exp(new_log_probs - old_log_probs)
-                surr1 = ratio * adv
-                surr2 = torch.clamp(ratio, 1 - ModelConfig.PPO_CLIP_EPS,
-                                    1 + ModelConfig.PPO_CLIP_EPS) * adv
-                policy_loss = -torch.min(surr1, surr2).mean()
+            # 检查梯度是否包含 NaN/Inf
+            grad_nan = False
+            for param in self.model.parameters():
+                if param.grad is not None:
+                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                        grad_nan = True
+                        param.grad = torch.zeros_like(param.grad)
 
-                value_loss = F.mse_loss(new_values, rewards.detach())
-                entropy_bonus = new_entropy.mean()
+            if grad_nan:
+                print(f"警告: Step {step} 检测到无效梯度，已清零")
 
-                loss = policy_loss + 0.5 * value_loss - entropy_coef * entropy_bonus / current_max_len
+            # 梯度裁剪
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=ModelConfig.GRAD_CLIP_NORM)
+            self.opt.step()
 
-                self.opt.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(self.model.parameters(), ModelConfig.GRAD_CLIP_NORM)
-                self.opt.step()
-
-                if self.use_lord:
-                    self.lord_opt.step()
-
-                total_loss_val += loss.item()
+            if self.use_lord:
+                self.lord_opt.step()
 
             self.scheduler.step()
 
             # 日志
             avg_reward = rewards.mean().item()
-            total_loss_val /= ModelConfig.PPO_EPOCHS
             postfix = {
                 "AvgRew": f"{avg_reward:.3f}",
                 "Best": f"{self.best_score:.3f}" if self.best_formula else "N/A",
-                "Loss": f"{total_loss_val:.2f}",
+                "Loss": f"{loss.item():.3f}",
                 "Unique": f"{unique_ratio:.0%}",
-                "Len": current_max_len,
             }
 
             if self.use_lord and step % 100 == 0:
@@ -431,14 +348,16 @@ class AlphaEngine:
             self.training_history["best_score"].append(
                 self.best_score if self.best_formula else None
             )
-            self.training_history["total_loss"].append(total_loss_val)
+            self.training_history["total_loss"].append(loss.item())
+            self.training_history["policy_loss"].append(policy_loss.item())
+            self.training_history["value_loss"].append(value_loss.item())
             self.training_history["best_formula"] = self.best_formula
             self.training_history["best_decoded"] = self._decode(self.best_formula) if self.best_formula else None
 
             with open("training_history.json", "w") as f:
                 json.dump(self.training_history, f, ensure_ascii=False, indent=2)
 
-            # 早停检查（确保课程学习有时间展开）
+            # 早停检查
             self.patience_counter += 1
             if self.patience_counter >= self.patience_limit and step >= ModelConfig.MIN_TRAIN_STEPS:
                 print(f"\n早停：连续 {self.patience_limit} 步无新最优，终止训练")

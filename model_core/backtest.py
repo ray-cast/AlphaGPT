@@ -2,35 +2,6 @@ import torch
 from .config import ModelConfig
 
 
-# ---- JIT 编译的纯函数 ----
-
-@torch.jit.script
-def _vectorized_ic_raw(factors: torch.Tensor, target_ret: torch.Tensor,
-                       valid_mask: torch.Tensor) -> torch.Tensor:
-    """向量化计算逐日 Pearson IC，返回原始均值。"""
-    n_valid = valid_mask.float().sum(dim=0).clamp(min=1)
-
-    f_c = torch.where(valid_mask, factors, 0.0)
-    r_c = torch.where(valid_mask, target_ret, 0.0)
-    f_mean = f_c.sum(dim=0) / n_valid
-    r_mean = r_c.sum(dim=0) / n_valid
-    f_c = torch.where(valid_mask, f_c - f_mean.unsqueeze(0), 0.0)
-    r_c = torch.where(valid_mask, r_c - r_mean.unsqueeze(0), 0.0)
-
-    cov = (f_c * r_c).sum(dim=0)
-    std_f = (f_c.pow(2).sum(dim=0)).sqrt().clamp(min=1e-6)
-    std_r = (r_c.pow(2).sum(dim=0)).sqrt().clamp(min=1e-6)
-    daily_ic = cov / (std_f * std_r)
-
-    valid_day = (n_valid >= 10) & (std_f > 1e-3) & (std_r > 1e-3)
-    ic_count = valid_day.float().sum()
-    if ic_count < 1:
-        return torch.tensor(0.0, device=factors.device)
-
-    avg_ic = (daily_ic * valid_day.float()).sum() / ic_count
-    return avg_ic
-
-
 class AshareBacktest:
     """A股截面选股回测引擎。
 
@@ -77,20 +48,25 @@ class AshareBacktest:
 
         # 持仓：每日 top-K
         position = torch.zeros_like(scores)
-        _, topk_idx = scores.topk(self.top_n, dim=0)
+        _, topk_idx = torch.topk(scores, self.top_n, dim=0)
         position.scatter_(0, topk_idx, 1.0)
 
         # PnL（含佣金）
         prev_pos = torch.roll(position, 1, dims=1)
         prev_pos[:, 0] = 0.0
         tx_cost = torch.abs(position - prev_pos) * self.commission
-        daily_pnl = (position * target_ret - tx_cost).sum(dim=0) / self.top_n
+        daily_pnl = (position * target_ret - tx_cost).sum(dim=0) / (self.top_n + 1e-9)
 
-        # 评分：IC × 10
-        if N_stocks > 10:
-            fitness = _vectorized_ic_raw(factors, target_ret, valid_mask) * 10.0
+        # ---- Fitness 计算 ----
+        # 1) Sortino 比率作为主指标
+        mean_ret = daily_pnl.mean()
+        neg_returns = daily_pnl[daily_pnl < 0]
+        if len(neg_returns) > 5:
+            downside_std = neg_returns.std()
         else:
-            fitness = torch.tensor(0.0, device=factors.device)
+            downside_std = daily_pnl.std() + 1e-6
+
+        sortino = mean_ret / (downside_std + 1e-6)
 
         # 计算夏普比率
         cum_ret = daily_pnl.sum().item()
@@ -102,4 +78,7 @@ class AshareBacktest:
         else:
             sharpe = 0.0
 
-        return fitness, cum_ret, daily_pnl, sharpe
+        # 综合得分
+        fitness = sortino
+
+        return fitness, cum_ret, daily_pnl, sharpe.item()
