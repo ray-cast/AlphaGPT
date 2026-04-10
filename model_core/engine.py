@@ -206,6 +206,9 @@ class AlphaEngine:
             bs = ModelConfig.BATCH_SIZE
             progress = step / max(ModelConfig.TRAIN_STEPS - 1, 1)
 
+            # 初始化进度条描述
+            pbar.set_description(f"生成公式...")
+
             # --- Phase 1: Rollout (no grad) ---
             eps = ModelConfig.EPS_GREEDY_START * (1 - progress) + ModelConfig.EPS_GREEDY_END * progress
             with torch.no_grad():
@@ -230,9 +233,20 @@ class AlphaEngine:
 
             # 公式去重：相同公式只执行一次，结果映射回原位置
             formulas = seqs.tolist()
+
             unique_map = {}  # tuple(formula) -> (score, ret_val)
             formula_keys = [None] * bs  # 缓存 trimmed keys，避免重复计算
+
             for i in range(bs):
+                # 更新进度条描述显示当前正在计算的公式
+                current_formula = self._decode(formulas[i])
+                # 限制长度避免进度条过长
+                if len(current_formula) > 30:
+                    current_formula = current_formula[:27] + "..."
+
+                # 显示当前正在计算的公式
+                pbar.set_description(f"计算: {current_formula}")
+
                 vlen = self._valid_prefix_len(formulas[i], feat_count, arity_map)
                 trimmed = formulas[i][:vlen]
                 fkey = tuple(trimmed)
@@ -240,6 +254,8 @@ class AlphaEngine:
                 if fkey in unique_map:
                     score, _ = unique_map[fkey]
                     rewards[i] = score
+                    # 缓存命中时更新为缓存状态
+                    pbar.set_description(f"缓存: {current_formula}")
                     continue
 
                 res = self.vm.execute(
