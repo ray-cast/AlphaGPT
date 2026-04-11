@@ -68,6 +68,7 @@ class AlphaEngine:
         self.training_history = {
             "step": [],
             "avg_reward": [],
+            "avg_ic": [],
             "best_score": [],
             "stable_rank": [],
             "total_loss": [],
@@ -202,8 +203,9 @@ class AlphaEngine:
             # 公式去重：相同公式只执行一次，结果映射回原位置
             formulas = seqs.tolist()
 
-            unique_map = {}  # tuple(formula) -> (score, ret_val)
+            unique_map = {}  # tuple(formula) -> (score, ret_val, ic)
             formula_keys = [None] * bs  # 缓存 trimmed keys，避免重复计算
+            ic_list = []  # 收集每个公式的 IC
 
             for i in range(bs):
                 # 更新进度条描述显示当前正在计算的公式
@@ -220,8 +222,9 @@ class AlphaEngine:
                 fkey = tuple(trimmed)
                 formula_keys[i] = fkey
                 if fkey in unique_map:
-                    score, _ = unique_map[fkey]
-                    rewards[i] = score
+                    cached_score, _, cached_ic = unique_map[fkey]
+                    rewards[i] = cached_score
+                    ic_list.append(cached_ic)
                     # 缓存命中时更新为缓存状态
                     pbar.set_description(f"缓存: {current_formula}")
                     continue
@@ -232,22 +235,25 @@ class AlphaEngine:
                     clean_feat=self.loader.clean_feat_tensor)
 
                 if res is None:
-                    unique_map[fkey] = (-1.0, 0.0)
+                    unique_map[fkey] = (-1.0, 0.0, 0.0)
                     rewards[i] = -1.0
+                    ic_list.append(0.0)
                     continue
 
                 if res.std() < 1e-4:
-                    unique_map[fkey] = (-0.5, 0.0)
+                    unique_map[fkey] = (-0.5, 0.0, 0.0)
                     rewards[i] = -0.5
+                    ic_list.append(0.0)
                     continue
 
-                score, ret_val, _, sharpe = self.bt.evaluate(
+                score, ret_val, _, sharpe, mean_ic = self.bt.evaluate(
                     res, self.loader.raw_data_cache, self.loader.target_ret,
                     start_idx=self.train_start, end_idx=self.train_end
                 )
 
-                unique_map[fkey] = (score.item(), ret_val)
+                unique_map[fkey] = (score.item(), ret_val, mean_ic)
                 rewards[i] = score
+                ic_list.append(mean_ic)
 
                 if score.item() > self.best_score:
                     self.best_score = score.item()
@@ -255,7 +261,7 @@ class AlphaEngine:
                     self.patience_counter = 0  # 重置早停计数器
                     decoded = self._decode(trimmed)
                     tqdm.write(
-                        f"[!] New Best: Score {score:.3f} "
+                        f"[!] New Best: Score {score:.3f} IC {mean_ic:.4f} "
                         f"CumRet {ret_val:.2%} "
                         f"Sharpe {sharpe:.2f} | {decoded}"
                     )
@@ -316,9 +322,11 @@ class AlphaEngine:
 
             # 日志
             avg_reward = rewards.mean().item()
+            avg_ic = sum(ic_list) / max(len(ic_list), 1)
             total_loss_val /= ModelConfig.PPO_EPOCHS
             postfix = {
                 "AvgRew": f"{avg_reward:.3f}",
+                "IC": f"{avg_ic:.4f}",
                 "Best": f"{self.best_score:.3f}" if self.best_formula else "N/A",
                 "Loss": f"{total_loss_val:.2f}",
                 "Unique": f"{unique_ratio:.0%}",
@@ -332,6 +340,7 @@ class AlphaEngine:
 
             self.training_history["step"].append(step)
             self.training_history["avg_reward"].append(avg_reward)
+            self.training_history["avg_ic"].append(avg_ic)
             self.training_history["best_score"].append(
                 self.best_score if self.best_formula else None
             )

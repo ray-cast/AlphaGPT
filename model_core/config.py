@@ -52,6 +52,9 @@ class ModelConfig:
     EPS_GREEDY_START = 0.3         # epsilon-greedy 起始值 (提高探索)
     EPS_GREEDY_END = 0.05          # epsilon-greedy 终止值 (保持适度探索)
 
+    # ---------- IC 奖励 ----------
+    IC_WEIGHT = 5.0              # IC 奖励权重（IC ≈ [-0.1, 0.1]，乘此系数与 Sortino 量级对齐）
+
     # ---------- 因子维度 ----------
     INPUT_DIM = 6
 

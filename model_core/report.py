@@ -49,7 +49,7 @@ class StrategyReport:
 
         # 复用训练回测引擎，确保报告结果与训练目标完全一致
         bt = AshareBacktest()
-        _, _, daily_pnl = bt.evaluate(
+        _, _, daily_pnl, _, _ = bt.evaluate(
             alpha_values, loader.raw_data_cache, loader.target_ret,
             start_idx=start, end_idx=end
         )
@@ -184,7 +184,7 @@ class StrategyReport:
 
         # --- 上图：净值曲线 ---
         ax1.plot(x, equity, label="Strategy (Open-to-Open)", linewidth=1.5)
-        bench_label = "HS300 Index" if self.loader.benchmark_ret is not None else "HS300 equal-wt"
+        bench_label = "中证全指" if self.loader.benchmark_ret is not None else "等权基准"
         ax1.plot(x, bench_equity, label=f"Benchmark ({bench_label})", alpha=0.5, linewidth=1)
 
         # 标注最大回撤区间

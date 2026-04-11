@@ -78,7 +78,24 @@ class AshareBacktest:
         else:
             sharpe = 0.0
 
-        # 综合得分
-        fitness = sortino
+        # ---- IC 计算（截面 Spearman rank correlation）----
+        f_scored = factors.masked_fill(~tradeable, float('-inf'))
+        r_scored = target_ret.masked_fill(~tradeable, float('-inf'))
+        f_rank = f_scored.argsort(dim=0).argsort(dim=0).float()
+        r_rank = r_scored.argsort(dim=0).argsort(dim=0).float()
+        valid_count = tradeable.float().sum(dim=0)
+        f_mean = (f_rank * tradeable.float()).sum(dim=0) / valid_count.clamp(min=1)
+        r_mean = (r_rank * tradeable.float()).sum(dim=0) / valid_count.clamp(min=1)
+        f_c = (f_rank - f_mean.unsqueeze(0)) * tradeable.float()
+        r_c = (r_rank - r_mean.unsqueeze(0)) * tradeable.float()
+        cov = (f_c * r_c).sum(dim=0)
+        ic_per_day = cov / (f_c.norm(dim=0) * r_c.norm(dim=0) + 1e-8)
+        std_f = (f_c.pow(2).sum(dim=0)).sqrt()
+        std_r = (r_c.pow(2).sum(dim=0)).sqrt()
+        valid_days = (valid_count >= 20) & (std_f > 1e-3) & (std_r > 1e-3)
+        mean_ic = ic_per_day[valid_days].mean().item() if valid_days.any() else 0.0
 
-        return fitness, cum_ret, daily_pnl, sharpe.item()
+        # 综合得分
+        fitness = sortino + ModelConfig.IC_WEIGHT * mean_ic
+
+        return fitness, cum_ret, daily_pnl, sharpe.item(), mean_ic
