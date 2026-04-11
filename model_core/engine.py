@@ -146,49 +146,15 @@ class AlphaEngine:
             values.append(val)
             entropies.append(dist.entropy())
 
-            inp_buf = inp_buf.clone()
             inp_buf[:, t + 1] = action
             self._step_open_slots(open_slots, action)
 
         return (
             torch.stack(log_probs, 1).sum(1),           # [B] total_log_prob
-            torch.stack(values, 1).squeeze(-1).mean(1),  # [B] mean_value
+            torch.stack(values, 1).squeeze(-1)[:, -1],   # [B] last-timestep value
             torch.stack(entropies, 1).sum(1),            # [B] total_entropy
         )
 
-    def _compute_gae(self, rewards, values, gamma, lambda_gae):
-        """
-        计算Generalized Advantage Estimation (GAE)。
-        平衡偏差和方差，比简单的adv = rewards - baseline更稳定。
-
-        Args:
-            rewards: [B] 每个序列的即时奖励
-            values: [B] 每个序列的baseline值（critic输出）
-            gamma: 折扣因子（通常0.99）
-            lambda_gae: GAE参数（通常0.95，0=当前，1=累积）
-
-        Returns:
-            advantages: [B] 计算得到的advantages
-        """
-        advantages = torch.zeros_like(rewards)
-        last_advantage = 0
-
-        # 反向计算GAE
-        for t in reversed(range(rewards.size(0))):
-            if t == rewards.size(0) - 1:
-                next_value = 0  # 最后一个状态没有未来
-            else:
-                next_value = values[t + 1]
-
-            # TD error: δ_t = r_t + γV(s_{t+1}) - V(s_t)
-            delta = rewards[t] + gamma * next_value - values[t]
-
-            # GAE累积: A_t = δ_t + γλA_{t+1}
-            advantages[t] = last_advantage = delta + gamma * lambda_gae * last_advantage
-
-        # 标准化advantages（保持数值稳定）
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        return advantages
 
     def train(self):
         lord_info = " (LoRD)" if self.use_lord else ""
@@ -297,7 +263,6 @@ class AlphaEngine:
                     # 立即写盘保存最佳分数
                     self.training_history["best_formula"] = self.best_formula
                     self.training_history["best_decoded"] = decoded
-                    self.training_history["best_score"].append(self.best_score)
                     with open("training_history.json", "w") as f:
                         json.dump(self.training_history, f, ensure_ascii=False, indent=2)
 
@@ -312,19 +277,11 @@ class AlphaEngine:
             with torch.no_grad():
                 old_log_probs, old_values, _ = self._evaluate_sequences(seqs, current_max_len)
 
-            # ---- Phase 3: Advantage (GAE - Generalized Advantage Estimation) ----
-            # 使用GAE替代简单的top-k + baseline方法
-            # GAE的优势：
-            # 1. 考虑累积效应（不仅是即时奖励）
-            # 2. 利用全部样本（不再只取top-k）
-            # 3. 平衡偏差和方差，提供更稳定的训练信号
-            # 4. 不再强制中心化，保持真实的梯度信号
-            adv = self._compute_gae(
-                rewards.detach(),
-                old_values.detach(),
-                gamma=ModelConfig.GAMMA,
-                lambda_gae=ModelConfig.GAE_LAMBDA
-            )
+            # ---- Phase 3: Advantage ----
+            # 每个公式序列只有一个终端奖励，没有中间时间步奖励，
+            # 因此 advantage = reward - baseline（critic 估计的 value）
+            adv = rewards.detach() - old_values.detach()
+            adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
             # Entropy 系数线性退火（比余弦退火探索期更长）
             entropy_coef = ModelConfig.ENTROPY_COEF_START * (1 - progress) + ModelConfig.ENTROPY_COEF_END * progress
