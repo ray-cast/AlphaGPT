@@ -52,6 +52,8 @@ class AlphaEngine:
         self.patience_counter = 0
         self.patience_limit = ModelConfig.PATIENCE_LIMIT
         self.bt = AshareBacktest()
+        self.valid_start = self.loader.valid_start
+        self.valid_end = self.loader.valid_end
         self.train_start = self.loader.train_start
         self.train_end = self.loader.train_end
         self.test_start = self.loader.test_start
@@ -260,6 +262,16 @@ class AlphaEngine:
                     self.best_formula = trimmed
                     self.patience_counter = 0  # 重置早停计数器
                     decoded = self._decode(trimmed)
+
+                    # 在验证集上评估，用于模型选择
+                    val_score, _, _, val_sharpe, val_ic = self.bt.evaluate(
+                        res, self.loader.raw_data_cache, self.loader.target_ret,
+                        start_idx=self.valid_start, end_idx=self.valid_end
+                    )
+
+                    if val_score.item() < self.best_score:
+                        continue
+
                     tqdm.write(
                         f"[!] New Best: Score {score:.3f} IC {mean_ic:.4f} "
                         f"CumRet {ret_val:.2%} "
