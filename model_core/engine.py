@@ -3,13 +3,12 @@ import json
 import torch
 import torch.nn as nn
 import math
-import torch.nn.functional as F
 from torch.distributions import Categorical
 from tqdm import tqdm
 
 from .config import ModelConfig
 from .data_loader import AshareDataLoader
-from .model import NeuralSymbolicAlphaGenerator, NewtonSchulzLowRankDecay, StableRankMonitor
+from .model import NeuralSymbolicAlphaGeneratorQFR, NewtonSchulzLowRankDecay, StableRankMonitor
 from .vm import PrefixVM
 from .backtest import AshareBacktest
 from .ops import OPS_CONFIG
@@ -21,7 +20,7 @@ class AlphaEngine:
         self.loader = AshareDataLoader()
         self.loader.load_data()
 
-        self.model = NeuralSymbolicAlphaGenerator().to(ModelConfig.DEVICE)
+        self.model = NeuralSymbolicAlphaGeneratorQFR().to(ModelConfig.DEVICE)
 
         # Standard optimizer
         self.opt = torch.optim.AdamW(self.model.parameters(), lr=1e-3)
@@ -75,7 +74,6 @@ class AlphaEngine:
             "stable_rank": [],
             "total_loss": [],
             "policy_loss": [],
-            "value_loss": [],
             "best_formula": None,
             "best_decoded": None,
         }
@@ -146,30 +144,43 @@ class AlphaEngine:
             current_max_len = ModelConfig.MAX_FORMULA_LEN
 
             bs = ModelConfig.BATCH_SIZE
-            progress = step / max(ModelConfig.TRAIN_STEPS - 1, 1)
 
             # 初始化进度条描述
             pbar.set_description(f"生成公式...")
 
-            open_slots = torch.ones(bs, dtype=torch.long, device=ModelConfig.DEVICE)
-            inp_buf = torch.full((bs, current_max_len + 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
-            tokens_list, log_prob_list, value_list, entropy_list = [], [], [], []
-            for t in range(current_max_len):
-                logits, val, _ = self.model(inp_buf[:, :t + 1])
-                mask = self._get_strict_mask(open_slots, t, current_max_len)
-                dist = Categorical(logits=(logits + mask))
-                action = dist.sample()
-                tokens_list.append(action)
-                log_prob_list.append(dist.log_prob(action))
-                value_list.append(val)
-                entropy_list.append(dist.entropy())
-                inp_buf[:, t + 1] = action
-                self._step_open_slots(open_slots, action)
+            # --- Phase 1: Rollout (no grad) ---
+            # 同时生成采样轨迹和贪心轨迹（QFR greedy baseline）
+            with torch.no_grad():
+                # 采样轨迹
+                s_slots = torch.ones(bs, dtype=torch.long, device=ModelConfig.DEVICE)
+                s_buf = torch.full((bs, current_max_len + 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
+                s_tokens = []
 
-            seqs = torch.stack(tokens_list, dim=1)
-            log_probs = torch.stack(log_prob_list, 1).sum(1)
-            values = torch.stack(value_list, 1).squeeze(-1)[:, -1]
-            entropy = torch.stack(entropy_list, 1).sum(1)
+                # 贪心轨迹
+                g_slots = torch.ones(bs, dtype=torch.long, device=ModelConfig.DEVICE)
+                g_buf = torch.full((bs, current_max_len + 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
+                g_tokens = []
+
+                for t in range(current_max_len):
+                    # 采样轨迹
+                    logits, _ = self.model(s_buf[:, :t + 1])
+                    mask = self._get_strict_mask(s_slots, t, current_max_len)
+                    dist = Categorical(logits=(logits + mask))
+                    action = dist.sample()
+                    s_tokens.append(action)
+                    s_buf[:, t + 1] = action
+                    self._step_open_slots(s_slots, action)
+
+                    # 贪心轨迹（共享同一个 policy，但取 argmax）
+                    g_logits, _ = self.model(g_buf[:, :t + 1])
+                    g_mask = self._get_strict_mask(g_slots, t, current_max_len)
+                    g_action = (g_logits + g_mask).argmax(dim=1)
+                    g_tokens.append(g_action)
+                    g_buf[:, t + 1] = g_action
+                    self._step_open_slots(g_slots, g_action)
+
+            seqs = torch.stack(s_tokens, dim=1)       # [bs, T] 采样公式
+            greedy_seqs = torch.stack(g_tokens, dim=1) # [bs, T] 贪心公式
 
             rewards = torch.zeros(bs, device=ModelConfig.DEVICE)
 
@@ -262,18 +273,69 @@ class AlphaEngine:
             if nan_rew_count > 0:
                 rewards = rewards.nan_to_num(nan=-1.0)
 
-            # ---- Phase 2: REINFORCE Update ----
-            # Advantage = reward - baseline（critic 估计的 value）
-            adv = rewards.detach() - values.detach()
-            adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+            # ---- Phase 1.5: 贪心轨迹 backtest（QFR greedy baseline）----
+            greedy_rewards = torch.zeros(bs, device=ModelConfig.DEVICE)
+            greedy_formulas = greedy_seqs.tolist()
+            greedy_unique_map = {}  # 复用去重逻辑
 
-            # Entropy 系数线性退火
-            entropy_coef = ModelConfig.ENTROPY_COEF_START * (1 - progress) + ModelConfig.ENTROPY_COEF_END * progress
+            for i in range(bs):
+                vlen = self._valid_prefix_len(greedy_formulas[i], feat_count, arity_map)
+                trimmed = greedy_formulas[i][:vlen]
+                fkey = tuple(trimmed)
+
+                if fkey in greedy_unique_map:
+                    greedy_rewards[i] = greedy_unique_map[fkey]
+                    continue
+
+                # 复用采样公式的缓存（如果贪心公式恰好和采样公式相同）
+                if fkey in unique_map:
+                    greedy_rewards[i] = unique_map[fkey][0]
+                    greedy_unique_map[fkey] = unique_map[fkey][0]
+                    continue
+
+                res = self.vm.execute(
+                    trimmed, self.loader.feat_tensor,
+                    nan_mask=self.loader.nan_mask,
+                    clean_feat=self.loader.clean_feat_tensor)
+
+                if res is None or res.std() < 1e-4:
+                    greedy_rewards[i] = -1.0
+                    greedy_unique_map[fkey] = -1.0
+                    continue
+
+                g_score, _, _, _, _ = self.bt.evaluate(
+                    res, self.loader.raw_data_cache, self.loader.target_ret,
+                    start_idx=self.train_start, end_idx=self.train_end,
+                    train_step=step
+                )
+                greedy_rewards[i] = g_score
+                greedy_unique_map[fkey] = g_score
+
+            # ---- Phase 2: Teacher-forcing 重新计算 log_probs（带梯度）----
+            open_slots_tf = torch.ones(bs, dtype=torch.long, device=ModelConfig.DEVICE)
+            inp_buf_tf = torch.full((bs, current_max_len + 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
+            tf_log_probs = []
+
+            for t in range(current_max_len):
+                inp = inp_buf_tf[:, :t + 1].clone()
+                logits, _ = self.model(inp)
+                mask = self._get_strict_mask(open_slots_tf, t, current_max_len)
+                dist = Categorical(logits=(logits + mask))
+                action = seqs[:, t]
+
+                tf_log_probs.append(dist.log_prob(action))
+
+                inp_buf_tf[:, t + 1] = action
+                self._step_open_slots(open_slots_tf, action)
+
+            log_probs = torch.stack(tf_log_probs, 1).sum(1)
+
+            # ---- Phase 3: QFR REINFORCE Update ----
+            # Advantage = r_sample - r_greedy（贪心 baseline，无偏，无需额外归一化）
+            adv = rewards.detach() - greedy_rewards.detach()
 
             policy_loss = -(log_probs * adv).mean()
-            value_loss = F.mse_loss(values, rewards.detach())
-            entropy_bonus = entropy.mean()
-            loss = policy_loss + 0.5 * value_loss - entropy_coef * entropy_bonus / current_max_len
+            loss = policy_loss
 
             self.opt.zero_grad()
             loss.backward()
