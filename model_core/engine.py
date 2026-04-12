@@ -150,18 +150,18 @@ class AlphaEngine:
 
             # --- Phase 1a: 采样轨迹（带梯度，直接收集 log_probs）---
             s_slots = torch.ones(bs, dtype=torch.long, device=ModelConfig.DEVICE)
-            s_buf = torch.full((bs, current_max_len + 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
             s_tokens = []
             s_log_probs = []
+            s_curr_inp = torch.full((bs, 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
 
             for t in range(current_max_len):
-                logits, _ = self.model(s_buf[:, :t + 1])
+                logits, _ = self.model(s_curr_inp)
                 mask = self._get_strict_mask(s_slots, t, current_max_len)
                 dist = Categorical(logits=(logits + mask))
                 action = dist.sample()
                 s_tokens.append(action)
                 s_log_probs.append(dist.log_prob(action))
-                s_buf[:, t + 1] = action
+                s_curr_inp = torch.cat([s_curr_inp, action.unsqueeze(1)], dim=1)
                 self._step_open_slots(s_slots, action)
 
             seqs = torch.stack(s_tokens, dim=1)         # [bs, T]
