@@ -289,51 +289,36 @@ class AlphaEngine:
             if nan_rew_count > 0:
                 rewards = rewards.nan_to_num(nan=-1.0)
 
-            # ---- Phase 2: Old policy log_probs ----
-            with torch.no_grad():
-                old_log_probs, old_values, _ = self._evaluate_sequences(seqs, current_max_len)
+            # ---- Phase 2: REINFORCE Update ----
+            log_probs, values, entropy = self._evaluate_sequences(seqs, current_max_len)
 
-            # ---- Phase 3: Advantage ----
-            # 每个公式序列只有一个终端奖励，没有中间时间步奖励，
-            # 因此 advantage = reward - baseline（critic 估计的 value）
-            adv = rewards.detach() - old_values.detach()
+            # Advantage = reward - baseline（critic 估计的 value）
+            adv = rewards.detach() - values.detach()
             adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
-            # Entropy 系数线性退火（比余弦退火探索期更长）
+            # Entropy 系数线性退火
             entropy_coef = ModelConfig.ENTROPY_COEF_START * (1 - progress) + ModelConfig.ENTROPY_COEF_END * progress
 
-            # ---- Phase 4: PPO Update ----
-            total_loss_val = 0.0
-            for _ in range(ModelConfig.PPO_EPOCHS):
-                new_log_probs, new_values, new_entropy = self._evaluate_sequences(seqs, current_max_len)
+            policy_loss = -(log_probs * adv).mean()
+            value_loss = F.mse_loss(values, rewards.detach())
+            entropy_bonus = entropy.mean()
+            loss = policy_loss + 0.5 * value_loss - entropy_coef * entropy_bonus / current_max_len
 
-                ratio = torch.exp(new_log_probs - old_log_probs)
-                surr1 = ratio * adv
-                surr2 = torch.clamp(ratio, 1 - ModelConfig.PPO_CLIP_EPS,
-                                    1 + ModelConfig.PPO_CLIP_EPS) * adv
-                policy_loss = -torch.min(surr1, surr2).mean()
+            self.opt.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(self.model.parameters(), ModelConfig.GRAD_CLIP_NORM)
+            self.opt.step()
 
-                value_loss = F.mse_loss(new_values, rewards.detach())
-                entropy_bonus = new_entropy.mean()
+            if self.use_lord:
+                self.lord_opt.step()
 
-                loss = policy_loss + 0.5 * value_loss - entropy_coef * entropy_bonus / current_max_len
-
-                self.opt.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(self.model.parameters(), ModelConfig.GRAD_CLIP_NORM)
-                self.opt.step()
-
-                if self.use_lord:
-                    self.lord_opt.step()
-
-                total_loss_val += loss.item()
+            total_loss_val = loss.item()
 
             self.scheduler.step()
 
             # 日志
             avg_reward = rewards.mean().item()
             avg_ic = sum(ic_list) / max(len(ic_list), 1)
-            total_loss_val /= ModelConfig.PPO_EPOCHS
             postfix = {
                 "AvgRew": f"{avg_reward:.3f}",
                 "IC": f"{avg_ic:.4f}",

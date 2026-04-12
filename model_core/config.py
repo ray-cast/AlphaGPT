@@ -37,14 +37,8 @@ class ModelConfig:
     PATIENCE_LIMIT = 50           # 连续 N 步无新 best 则早停
     MIN_TRAIN_STEPS = 300         # 至少跑 N 步再允许早停（等 entropy 退火到 ≈0.06）
 
-    # ---------- PPO ----------
-    PPO_EPOCHS = 4           # 每次 rollout 的 PPO 更新轮数
-    PPO_CLIP_EPS = 0.2       # PPO clip epsilon
+    # ---------- 优化 ----------
     GRAD_CLIP_NORM = 0.5     # 梯度裁剪范数
-
-    # ---------- GAE (Generalized Advantage Estimation) ----------
-    GAMMA = 0.99             # 折扣因子，权衡未来奖励
-    GAE_LAMBDA = 0.95        # GAE参数，平衡偏差和方差（0=当前，1=累积）
 
     # ---------- 探索与多样性 ----------
     ENTROPY_COEF_START = 0.1        # 起始 entropy 系数 (提高探索)
