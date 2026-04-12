@@ -337,6 +337,8 @@ OPS_CONFIG = [
     ('POW', lambda x, y: torch.pow(x.abs() + 1e-8, y), 2),
     ('GREATER', lambda x, y: (x > y).float(), 2),
     ('LESS', lambda x, y: (x < y).float(), 2),
+    ('MIN', lambda x, y: torch.min(x, y), 2),
+    ('MAX', lambda x, y: torch.max(x, y), 2),
     # ---- 常量（arity=0，返回标量，运算时自动广播） ----
     ('CONST_-30', lambda: -30.0, 0),
     ('CONST_-20', lambda: -20.0, 0),
@@ -345,6 +347,7 @@ OPS_CONFIG = [
     ('CONST_-2', lambda: -2.0, 0),
     ('CONST_-1', lambda: -1.0, 0),
     ('CONST_-0.5', lambda: -0.5, 0),
+    ('CONST_0', lambda: 0.0, 0),
     ('CONST_0.5', lambda: 0.5, 0),
     ('CONST_1', lambda: 1.0, 0),
     ('CONST_2', lambda: 2.0, 0),

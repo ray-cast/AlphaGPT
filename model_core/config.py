@@ -24,7 +24,7 @@ class ModelConfig:
     # ---------- 训练参数 ----------
     BATCH_SIZE = 1024
     TRAIN_STEPS = 500
-    MAX_FORMULA_LEN = 10
+    MAX_FORMULA_LEN = 16
 
     # ---------- A股交易成本 ----------
     COMMISSION_RATE = 0.00025           # 佣金 万2.5（买卖双边）
