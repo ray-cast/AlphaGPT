@@ -273,7 +273,7 @@ class AlphaEngine:
                         continue
 
                     tqdm.write(
-                        f"[!] New Best: Score {score:.3f} IC {mean_ic:.4f} "
+                        f"[!] New Best: Score {score:.3f} Rank IC {mean_ic:.4f} "
                         f"CumRet {ret_val:.2%} "
                         f"Sharpe {sharpe:.2f} | {decoded}"
                     )
@@ -283,8 +283,6 @@ class AlphaEngine:
                     self.training_history["best_decoded"] = decoded
                     with open("training_history.json", "w") as f:
                         json.dump(self.training_history, f, ensure_ascii=False, indent=2)
-
-            unique_ratio = len(unique_map) / bs
 
             # 清理 NaN rewards（如 POW|CLOSE|CONST_-20 产生 inf/nan）
             nan_rew_count = torch.isnan(rewards).sum().item()
@@ -341,7 +339,6 @@ class AlphaEngine:
                 "IC": f"{avg_ic:.4f}",
                 "Best": f"{self.best_score:.3f}" if self.best_formula else "N/A",
                 "Loss": f"{total_loss_val:.2f}",
-                "Unique": f"{unique_ratio:.0%}",
                 "Len": current_max_len,
             }
 
