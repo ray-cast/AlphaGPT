@@ -180,8 +180,6 @@ class AlphaEngine:
             # 初始化进度条描述
             pbar.set_description(f"生成公式...")
 
-            # --- Phase 1: Rollout (no grad) ---
-            eps = ModelConfig.EPS_GREEDY_START * (1 - progress) + ModelConfig.EPS_GREEDY_END * progress
             with torch.no_grad():
                 open_slots = torch.ones(bs, dtype=torch.long, device=ModelConfig.DEVICE)
                 inp_buf = torch.full((bs, current_max_len + 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
@@ -190,10 +188,7 @@ class AlphaEngine:
                     logits, _, _ = self.model(inp_buf[:, :t + 1])
                     mask = self._get_strict_mask(open_slots, t, current_max_len)
                     dist = Categorical(logits=(logits + mask))
-                    # epsilon-greedy: 以 eps 概率在有效动作空间均匀采样
-                    uniform = Categorical(probs=mask.softmax(dim=1).clamp(min=1e-8))
-                    use_random = torch.rand(bs, device=ModelConfig.DEVICE) < eps
-                    action = torch.where(use_random, uniform.sample(), dist.sample())
+                    action = dist.sample()
                     tokens_list.append(action)
                     inp_buf[:, t + 1] = action
                     self._step_open_slots(open_slots, action)
@@ -312,7 +307,7 @@ class AlphaEngine:
             if self.use_lord:
                 self.lord_opt.step()
 
-            total_loss_val = loss.item()
+            total_loss = loss.item()
 
             self.scheduler.step()
 
@@ -323,7 +318,7 @@ class AlphaEngine:
                 "AvgRew": f"{avg_reward:.3f}",
                 "IC": f"{avg_ic:.4f}",
                 "Best": f"{self.best_score:.3f}" if self.best_formula else "N/A",
-                "Loss": f"{total_loss_val:.2f}",
+                "Loss": f"{total_loss:.2f}",
                 "Len": current_max_len,
             }
 
@@ -338,7 +333,7 @@ class AlphaEngine:
             self.training_history["best_score"].append(
                 self.best_score if self.best_formula else None
             )
-            self.training_history["total_loss"].append(total_loss_val)
+            self.training_history["total_loss"].append(total_loss)
             self.training_history["best_formula"] = self.best_formula
             self.training_history["best_decoded"] = self._decode(self.best_formula) if self.best_formula else None
 
