@@ -148,30 +148,32 @@ class AlphaEngine:
             # 初始化进度条描述
             pbar.set_description(f"生成公式...")
 
-            # --- Phase 1: Rollout (no grad) ---
-            # 同时生成采样轨迹和贪心轨迹（QFR greedy baseline）
-            with torch.no_grad():
-                # 采样轨迹
-                s_slots = torch.ones(bs, dtype=torch.long, device=ModelConfig.DEVICE)
-                s_buf = torch.full((bs, current_max_len + 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
-                s_tokens = []
+            # --- Phase 1a: 采样轨迹（带梯度，直接收集 log_probs）---
+            s_slots = torch.ones(bs, dtype=torch.long, device=ModelConfig.DEVICE)
+            s_buf = torch.full((bs, current_max_len + 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
+            s_tokens = []
+            s_log_probs = []
 
-                # 贪心轨迹
+            for t in range(current_max_len):
+                logits, _ = self.model(s_buf[:, :t + 1])
+                mask = self._get_strict_mask(s_slots, t, current_max_len)
+                dist = Categorical(logits=(logits + mask))
+                action = dist.sample()
+                s_tokens.append(action)
+                s_log_probs.append(dist.log_prob(action))
+                s_buf[:, t + 1] = action
+                self._step_open_slots(s_slots, action)
+
+            seqs = torch.stack(s_tokens, dim=1)         # [bs, T]
+            log_probs = torch.stack(s_log_probs, dim=1).sum(1)  # [bs]
+
+            # --- Phase 1b: 贪心轨迹（no grad，仅供 baseline）---
+            with torch.no_grad():
                 g_slots = torch.ones(bs, dtype=torch.long, device=ModelConfig.DEVICE)
                 g_buf = torch.full((bs, current_max_len + 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
                 g_tokens = []
 
                 for t in range(current_max_len):
-                    # 采样轨迹
-                    logits, _ = self.model(s_buf[:, :t + 1])
-                    mask = self._get_strict_mask(s_slots, t, current_max_len)
-                    dist = Categorical(logits=(logits + mask))
-                    action = dist.sample()
-                    s_tokens.append(action)
-                    s_buf[:, t + 1] = action
-                    self._step_open_slots(s_slots, action)
-
-                    # 贪心轨迹（共享同一个 policy，但取 argmax）
                     g_logits, _ = self.model(g_buf[:, :t + 1])
                     g_mask = self._get_strict_mask(g_slots, t, current_max_len)
                     g_action = (g_logits + g_mask).argmax(dim=1)
@@ -179,8 +181,7 @@ class AlphaEngine:
                     g_buf[:, t + 1] = g_action
                     self._step_open_slots(g_slots, g_action)
 
-            seqs = torch.stack(s_tokens, dim=1)       # [bs, T] 采样公式
-            greedy_seqs = torch.stack(g_tokens, dim=1) # [bs, T] 贪心公式
+                greedy_seqs = torch.stack(g_tokens, dim=1)  # [bs, T]
 
             rewards = torch.zeros(bs, device=ModelConfig.DEVICE)
 
@@ -311,26 +312,7 @@ class AlphaEngine:
                 greedy_rewards[i] = g_score
                 greedy_unique_map[fkey] = g_score
 
-            # ---- Phase 2: Teacher-forcing 重新计算 log_probs（带梯度）----
-            open_slots_tf = torch.ones(bs, dtype=torch.long, device=ModelConfig.DEVICE)
-            inp_buf_tf = torch.full((bs, current_max_len + 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
-            tf_log_probs = []
-
-            for t in range(current_max_len):
-                inp = inp_buf_tf[:, :t + 1].clone()
-                logits, _ = self.model(inp)
-                mask = self._get_strict_mask(open_slots_tf, t, current_max_len)
-                dist = Categorical(logits=(logits + mask))
-                action = seqs[:, t]
-
-                tf_log_probs.append(dist.log_prob(action))
-
-                inp_buf_tf[:, t + 1] = action
-                self._step_open_slots(open_slots_tf, action)
-
-            log_probs = torch.stack(tf_log_probs, 1).sum(1)
-
-            # ---- Phase 3: QFR REINFORCE Update ----
+            # ---- Phase 2: QFR REINFORCE Update ----
             # Advantage = r_sample - r_greedy（贪心 baseline，无偏，无需额外归一化）
             adv = rewards.detach() - greedy_rewards.detach()
 
