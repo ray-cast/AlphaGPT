@@ -44,8 +44,11 @@ class ModelConfig:
     ENTROPY_COEF_START = 0.1        # 起始 entropy 系数 (提高探索)
     ENTROPY_COEF_END = 0.02         # 终止 entropy 系数 (保持适度探索)
 
-    # ---------- IC 奖励 ----------
-    IC_WEIGHT = 5.0              # IC 奖励权重（IC ≈ [-0.1, 0.1]，乘此系数与 Sortino 量级对齐）
+    # ---------- QFR 奖励塑形 ----------
+    QFR_LAMBDA = 0.02            # 塑形系数 λ（IR 不达标时的惩罚力度）
+    QFR_ALPHA = 100              # 时间延迟 α（训练多少步后开始 IR 测试）
+    QFR_ETA = 2.65e-6            # 斜率 η（IR 门槛提升速度）
+    QFR_DELTA = 0.3              # 最大 IR 测试值 δ
 
     # ---------- 因子维度 ----------
     INPUT_DIM = 6

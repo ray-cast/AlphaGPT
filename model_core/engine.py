@@ -59,7 +59,7 @@ class AlphaEngine:
         self.test_start = self.loader.test_start
         self.test_end = self.loader.test_end
 
-        # 预计算 arity 张量，供 rollout 和 _evaluate_sequences 共用
+        # 预计算 arity 张量
         feat_count = len(self.model.features_list)
         self.arity_tens = torch.zeros(self.model.vocab_size, dtype=torch.long, device=ModelConfig.DEVICE)
         for i, cfg in enumerate(OPS_CONFIG):
@@ -130,35 +130,6 @@ class AlphaEngine:
                 return i + 1
         return len(tokens)
 
-    def _evaluate_sequences(self, seqs, max_len):
-        """Teacher-forcing: 用当前模型重新评估序列的 log_probs, values, entropy。"""
-        B, T = seqs.shape
-        open_slots = torch.ones(B, dtype=torch.long, device=ModelConfig.DEVICE)
-        inp_buf = torch.full((B, T + 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
-
-        log_probs, values, entropies = [], [], []
-
-        for t in range(T):
-            inp = inp_buf[:, :t + 1].clone()
-            logits, val, _ = self.model(inp)
-            mask = self._get_strict_mask(open_slots, t, max_len)
-            dist = Categorical(logits=(logits + mask))
-            action = seqs[:, t]
-
-            log_probs.append(dist.log_prob(action))
-            values.append(val)
-            entropies.append(dist.entropy())
-
-            inp_buf[:, t + 1] = action
-            self._step_open_slots(open_slots, action)
-
-        return (
-            torch.stack(log_probs, 1).sum(1),           # [B] total_log_prob
-            torch.stack(values, 1).squeeze(-1)[:, -1],   # [B] last-timestep value
-            torch.stack(entropies, 1).sum(1),            # [B] total_entropy
-        )
-
-
     def train(self):
         lord_info = " (LoRD)" if self.use_lord else ""
         print(f"开始沪深300 Alpha Mining{lord_info}...")
@@ -180,20 +151,25 @@ class AlphaEngine:
             # 初始化进度条描述
             pbar.set_description(f"生成公式...")
 
-            with torch.no_grad():
-                open_slots = torch.ones(bs, dtype=torch.long, device=ModelConfig.DEVICE)
-                inp_buf = torch.full((bs, current_max_len + 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
-                tokens_list = []
-                for t in range(current_max_len):
-                    logits, _, _ = self.model(inp_buf[:, :t + 1])
-                    mask = self._get_strict_mask(open_slots, t, current_max_len)
-                    dist = Categorical(logits=(logits + mask))
-                    action = dist.sample()
-                    tokens_list.append(action)
-                    inp_buf[:, t + 1] = action
-                    self._step_open_slots(open_slots, action)
+            open_slots = torch.ones(bs, dtype=torch.long, device=ModelConfig.DEVICE)
+            inp_buf = torch.full((bs, current_max_len + 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
+            tokens_list, log_prob_list, value_list, entropy_list = [], [], [], []
+            for t in range(current_max_len):
+                logits, val, _ = self.model(inp_buf[:, :t + 1])
+                mask = self._get_strict_mask(open_slots, t, current_max_len)
+                dist = Categorical(logits=(logits + mask))
+                action = dist.sample()
+                tokens_list.append(action)
+                log_prob_list.append(dist.log_prob(action))
+                value_list.append(val)
+                entropy_list.append(dist.entropy())
+                inp_buf[:, t + 1] = action
+                self._step_open_slots(open_slots, action)
 
             seqs = torch.stack(tokens_list, dim=1)
+            log_probs = torch.stack(log_prob_list, 1).sum(1)
+            values = torch.stack(value_list, 1).squeeze(-1)[:, -1]
+            entropy = torch.stack(entropy_list, 1).sum(1)
 
             rewards = torch.zeros(bs, device=ModelConfig.DEVICE)
 
@@ -245,15 +221,16 @@ class AlphaEngine:
 
                 score, ret_val, _, sharpe, mean_ic = self.bt.evaluate(
                     res, self.loader.raw_data_cache, self.loader.target_ret,
-                    start_idx=self.train_start, end_idx=self.train_end
+                    start_idx=self.train_start, end_idx=self.train_end,
+                    train_step=step
                 )
 
-                unique_map[fkey] = (score.item(), ret_val, mean_ic)
+                unique_map[fkey] = (score, ret_val, mean_ic)
                 rewards[i] = score
                 ic_list.append(mean_ic)
 
-                if score.item() > self.best_score:
-                    self.best_score = score.item()
+                if score > self.best_score:
+                    self.best_score = score
                     self.best_formula = trimmed
                     self.patience_counter = 0  # 重置早停计数器
                     decoded = self._decode(trimmed)
@@ -261,14 +238,15 @@ class AlphaEngine:
                     # 在验证集上评估，用于模型选择
                     val_score, _, _, val_sharpe, val_ic = self.bt.evaluate(
                         res, self.loader.raw_data_cache, self.loader.target_ret,
-                        start_idx=self.valid_start, end_idx=self.valid_end
+                        start_idx=self.valid_start, end_idx=self.valid_end,
+                        train_step=step
                     )
 
-                    if val_score.item() < self.best_score:
+                    if val_score < self.best_score:
                         continue
 
                     tqdm.write(
-                        f"[!] New Best: Score {score:.3f} IR {mean_ic:.4f} "
+                        f"[!] New Best: Score {score:.3f} IC {mean_ic:.4f} "
                         f"CumRet {ret_val:.2%} "
                         f"Sharpe {sharpe:.2f} | {decoded}"
                     )
@@ -285,8 +263,6 @@ class AlphaEngine:
                 rewards = rewards.nan_to_num(nan=-1.0)
 
             # ---- Phase 2: REINFORCE Update ----
-            log_probs, values, entropy = self._evaluate_sequences(seqs, current_max_len)
-
             # Advantage = reward - baseline（critic 估计的 value）
             adv = rewards.detach() - values.detach()
             adv = (adv - adv.mean()) / (adv.std() + 1e-8)

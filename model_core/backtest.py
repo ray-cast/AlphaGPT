@@ -14,7 +14,7 @@ class AshareBacktest:
         self.min_turnover = ModelConfig.MIN_TURNOVER_RATE
         self.top_n = ModelConfig.TOP_N_STOCKS
 
-    def evaluate(self, factors, raw_data, target_ret, start_idx=0, end_idx=None):
+    def evaluate(self, factors, raw_data, target_ret, start_idx=0, end_idx=None, train_step=0):
         """
         Args:
             factors:    [num_stocks, T] alpha 信号（来自 PrefixVM）
@@ -97,7 +97,9 @@ class AshareBacktest:
         ic_std = ic_per_day[valid_days].std().item() if valid_days.sum() > 1 else 1.0
         ir = mean_ic / (ic_std + 1e-8)
 
-        # 综合得分
-        fitness = sortino + ModelConfig.IC_WEIGHT * ir
+        # 综合得分（QFR: IC̄ − λ · 𝟙{IR ≤ clip[(step − α)·η, 0, δ]}）
+        clip_val = min(max((train_step - ModelConfig.QFR_ALPHA) * ModelConfig.QFR_ETA, 0.0), ModelConfig.QFR_DELTA)
+        ir_penalty = ModelConfig.QFR_LAMBDA if ir <= clip_val else 0.0
+        fitness = mean_ic - ir_penalty
 
-        return fitness, cum_ret, daily_pnl, sharpe.item(), ir
+        return fitness, cum_ret, daily_pnl, sharpe.item(), mean_ic
