@@ -273,7 +273,7 @@ class AlphaEngine:
                         continue
 
                     tqdm.write(
-                        f"[!] New Best: Score {score:.3f} Rank IC {mean_ic:.4f} "
+                        f"[!] New Best: Score {score:.3f} IR {mean_ic:.4f} "
                         f"CumRet {ret_val:.2%} "
                         f"Sharpe {sharpe:.2f} | {decoded}"
                     )

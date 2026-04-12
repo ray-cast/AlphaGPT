@@ -94,8 +94,10 @@ class AshareBacktest:
         std_r = (r_c.pow(2).sum(dim=0)).sqrt()
         valid_days = (valid_count >= 20) & (std_f > 1e-3) & (std_r > 1e-3)
         mean_ic = ic_per_day[valid_days].mean().item() if valid_days.any() else 0.0
+        ic_std = ic_per_day[valid_days].std().item() if valid_days.sum() > 1 else 1.0
+        ir = mean_ic / (ic_std + 1e-8)
 
         # 综合得分
-        fitness = sortino + ModelConfig.IC_WEIGHT * mean_ic
+        fitness = sortino + ModelConfig.IC_WEIGHT * ir
 
-        return fitness, cum_ret, daily_pnl, sharpe.item(), mean_ic
+        return fitness, cum_ret, daily_pnl, sharpe.item(), ir
