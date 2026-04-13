@@ -199,7 +199,7 @@ class AlphaEngine:
                     current_formula = current_formula[:27] + "..."
 
                 # 显示当前正在计算的公式
-                pbar.set_description(f"计算: {current_formula}")
+                pbar.set_description(f"[{i}/{bs}] 计算: {current_formula}")
 
                 vlen = self._valid_prefix_len(formulas[i], feat_count, arity_map)
                 trimmed = formulas[i][:vlen]

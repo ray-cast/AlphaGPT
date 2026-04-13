@@ -56,7 +56,7 @@ def run_train():
     from model_core.engine import AlphaEngine
 
     print("[3/3] 开始因子挖掘训练...")
-    eng = AlphaEngine(use_lord_regularization=True)
+    eng = AlphaEngine(use_lord_regularization=False)
     eng.train()
     eng.generate_signals()
 
