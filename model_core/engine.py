@@ -242,16 +242,6 @@ class AlphaEngine:
                     self.patience_counter = 0  # 重置早停计数器
                     decoded = self._decode(trimmed)
 
-                    # 在验证集上评估，用于模型选择
-                    val_score, _, _, val_sharpe, val_ic = self.bt.evaluate(
-                        res, self.loader.raw_data_cache, self.loader.target_ret,
-                        start_idx=self.valid_start, end_idx=self.valid_end,
-                        train_step=step
-                    )
-
-                    if val_score < self.best_score:
-                        continue
-
                     tqdm.write(
                         f"[!] New Best: Score {score:.3f} IC {mean_ic:.4f} "
                         f"CumRet {ret_val:.2%} "

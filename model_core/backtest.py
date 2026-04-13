@@ -104,6 +104,6 @@ class AshareBacktest:
         # 综合得分（QFR: IC̄ − λ · 𝟙{IR ≤ clip[(step − α)·η, 0, δ]}）
         clip_val = min(max((train_step - ModelConfig.QFR_ALPHA) * ModelConfig.QFR_ETA, 0.0), ModelConfig.QFR_DELTA)
         ir_penalty = ModelConfig.QFR_LAMBDA if ir <= clip_val else 0.0
-        fitness = ModelConfig.IC_WEIGHT * (mean_ic - ir_penalty)
+        fitness = sortino.item() + ModelConfig.IC_WEIGHT * (mean_ic - ir_penalty)
 
         return fitness, cum_ret, daily_pnl, sharpe, mean_ic
