@@ -199,7 +199,7 @@ class AlphaEngine:
                     current_formula = current_formula[:27] + "..."
 
                 # 显示当前正在计算的公式
-                pbar.set_description(f"[{i}/{bs}] 计算: {current_formula}")
+                pbar.set_description(f"[{i}/{bs}]: {current_formula}")
 
                 vlen = self._valid_prefix_len(formulas[i], feat_count, arity_map)
                 trimmed = formulas[i][:vlen]
@@ -208,8 +208,6 @@ class AlphaEngine:
                 if fkey in unique_map:
                     cached_score, _ = unique_map[fkey]
                     rewards[i] = cached_score
-                    # 缓存命中时更新为缓存状态
-                    pbar.set_description(f"缓存: {current_formula}")
                     continue
 
                 res = self.vm.execute(
@@ -320,8 +318,7 @@ class AlphaEngine:
             avg_reward = rewards.mean().item()
             postfix = {
                 "AvgRew": f"{avg_reward:.3f}",
-                "Loss": f"{total_loss:.2f}",
-                "Len": current_max_len,
+                "Loss": f"{total_loss:.2f}"
             }
 
             if self.use_lord and step % 100 == 0:
