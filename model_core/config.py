@@ -42,7 +42,7 @@ class ModelConfig:
 
     # ---------- 探索与多样性 ----------
     ENTROPY_COEF_START = 0.1        # 起始 entropy 系数 (提高探索)
-    ENTROPY_COEF_END = 0.02         # 终止 entropy 系数 (保持适度探索)
+    ENTROPY_COEF_END = 0.05         # 终止 entropy 系数 (保持适度探索)
 
     # ---------- IC 奖励 ----------
     IC_WEIGHT = 5.0              # IC 奖励权重（IC ≈ [-0.1, 0.1]，乘此系数与 Sortino 量级对齐）

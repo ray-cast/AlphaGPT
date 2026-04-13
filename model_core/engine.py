@@ -152,6 +152,7 @@ class AlphaEngine:
             s_slots = torch.ones(bs, dtype=torch.long, device=ModelConfig.DEVICE)
             s_tokens = []
             s_log_probs = []
+            s_entropies = []
             s_curr_inp = torch.full((bs, 1), self.model.bos_id, dtype=torch.long, device=ModelConfig.DEVICE)
 
             for t in range(current_max_len):
@@ -161,6 +162,7 @@ class AlphaEngine:
                 action = dist.sample()
                 s_tokens.append(action)
                 s_log_probs.append(dist.log_prob(action))
+                s_entropies.append(dist.entropy())
                 s_curr_inp = torch.cat([s_curr_inp, action.unsqueeze(1)], dim=1)
                 self._step_open_slots(s_slots, action)
 
@@ -299,7 +301,12 @@ class AlphaEngine:
             # Advantage = r_sample - r_greedy（贪心 baseline，无偏，无需额外归一化）
             adv = rewards.detach() - greedy_rewards.detach()
 
-            policy_loss = -(log_probs * adv).mean()
+            # Entropy bonus（线性退火）
+            progress = step / max(ModelConfig.TRAIN_STEPS - 1, 1)
+            entropy_coef = ModelConfig.ENTROPY_COEF_START + progress * (ModelConfig.ENTROPY_COEF_END - ModelConfig.ENTROPY_COEF_START)
+            entropy = torch.stack(s_entropies, dim=1).sum(1).mean()
+
+            policy_loss = -(log_probs * adv).mean() - entropy_coef * entropy
             loss = policy_loss
 
             self.opt.zero_grad()
