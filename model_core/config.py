@@ -22,8 +22,8 @@ class ModelConfig:
     # 验证集：2017-2018（熊市） | 训练集：2019-2023 | 测试集：2024-2026
 
     # ---------- 训练参数 ----------
-    BATCH_SIZE = 1024
-    TRAIN_STEPS = 500
+    BATCH_SIZE = 64
+    TRAIN_STEPS = 100000
     MAX_FORMULA_LEN = 16
 
     # ---------- A股交易成本 ----------
