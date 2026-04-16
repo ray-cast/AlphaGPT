@@ -106,4 +106,4 @@ class AshareBacktest:
         ir_penalty = ModelConfig.QFR_LAMBDA if ir <= clip_val else 0.0
         fitness = sortino.item() + ModelConfig.IC_WEIGHT * (mean_ic - ir_penalty)
 
-        return fitness, cum_ret, daily_pnl, sharpe, mean_ic
+        return fitness, cum_ret, daily_pnl, sharpe, mean_ic, ir

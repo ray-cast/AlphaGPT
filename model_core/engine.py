@@ -227,7 +227,7 @@ class AlphaEngine:
                     rewards[i] = -0.5
                     continue
 
-                score, ret_val, _, sharpe, mean_ic = self.bt.evaluate(
+                score, ret_val, _, sharpe, mean_ic, ir = self.bt.evaluate(
                     res, self.loader.raw_data_cache, self.loader.target_ret,
                     start_idx=self.train_start, end_idx=self.train_end,
                     train_step=step
@@ -243,7 +243,7 @@ class AlphaEngine:
                     decoded = self._decode(trimmed)
 
                     tqdm.write(
-                        f"[!] New Best: Score {score:.3f} IC {mean_ic:.4f} "
+                        f"[!] New Best: Score {score:.3f} IC {mean_ic:.4f} IR {ir:.2f} "
                         f"CumRet {ret_val:.2%} "
                         f"Sharpe {sharpe:.2f} | {decoded}"
                     )
@@ -289,7 +289,7 @@ class AlphaEngine:
                     greedy_unique_map[fkey] = -1.0
                     continue
 
-                g_score, _, _, _, _ = self.bt.evaluate(
+                g_score, _, _, _, _, _ = self.bt.evaluate(
                     res, self.loader.raw_data_cache, self.loader.target_ret,
                     start_idx=self.train_start, end_idx=self.train_end,
                     train_step=step
